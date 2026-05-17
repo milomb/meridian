@@ -9,8 +9,7 @@ import * as Speech from 'expo-speech';
 import * as Calendar from 'expo-calendar';
 import { Audio } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
-import { sendAIMessage } from '../../src/utils/ai';
-import { parseAIResponse, executeAction, buildSystemPrompt, getActionLabel } from '../../src/utils/aiActions';
+import { sendMessageWithTools, ChatMessage, ProviderConfig } from '../../src/ai/client';
 import { useColors, getCategoryColor } from '../../src/theme/colors';
 import {
   useScheduleStore, getCurrentBlock, getUpcomingBlocks,
@@ -119,14 +118,12 @@ async function getBestVoice() {
   return cachedVoice;
 }
 
-interface FabTurn { role: 'user' | 'assistant'; content: string; raw?: string; }
+interface FabTurn { role: 'user' | 'assistant'; content: string; }
 
 function JarvisFab({
-  apiKey, groqApiKey, ollamaUrl, ollamaModel, provider, userName,
-  onActionChange,
+  groqApiKey, userName, onActionChange,
 }: {
-  apiKey: string; groqApiKey: string; ollamaUrl: string; ollamaModel: string;
-  provider: 'anthropic' | 'groq' | 'ollama'; userName: string;
+  groqApiKey: string; userName: string;
   onActionChange: (label: string | null) => void;
 }) {
   const c = useColors();
@@ -139,7 +136,7 @@ function JarvisFab({
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const ringAnim = useRef(new Animated.Value(0)).current;
 
-  const activeKey = provider === 'groq' ? groqApiKey : provider === 'ollama' ? ollamaUrl : apiKey;
+  const activeKey = groqApiKey;
 
   useEffect(() => {
     if (phase !== 'idle') {
@@ -195,19 +192,18 @@ function JarvisFab({
     const newHistory: FabTurn[] = [...history, { role: 'user', content: trimmed }];
     setHistory(newHistory);
     try {
-      const aiMessages = newHistory.map((t) => ({ role: t.role, content: t.raw ?? t.content }));
-      const raw = await sendAIMessage(aiMessages, buildSystemPrompt(userName), provider, apiKey, groqApiKey, 350, ollamaUrl, ollamaModel);
-      const parsed = parseAIResponse(raw);
-      if (parsed.action && parsed.action.type !== 'NONE') {
-        const result = executeAction(parsed.action);
-        onActionChange(result ? null : getActionLabel(parsed.action));
+      const chatHistory: ChatMessage[] = newHistory.map((t) => ({ role: t.role, content: t.content }));
+      const config: ProviderConfig = { provider: 'groq', apiKey: groqApiKey };
+      const result = await sendMessageWithTools(chatHistory, userName, config);
+      if (result.actionResult) {
+        onActionChange(result.actionResult);
+        setTimeout(() => onActionChange(null), 4000);
       } else {
         onActionChange(null);
       }
-      const reply = parsed.message;
-      setResponse(reply);
-      setHistory((prev) => [...prev, { role: 'assistant', content: reply, raw }]);
-      speakReply(reply);
+      setResponse(result.text);
+      setHistory((prev) => [...prev, { role: 'assistant', content: result.text }]);
+      speakReply(result.text);
     } catch (err: any) {
       setHistory((prev) => prev.slice(0, -1));
       setPhase('idle');
@@ -216,7 +212,7 @@ function JarvisFab({
   };
 
   const openModal = () => {
-    if (!activeKey) { Alert.alert('No AI configured', 'Add a key in Browse → Settings.'); return; }
+    if (!activeKey) { Alert.alert('Groq API key required', 'Add a free Groq key in Browse → Settings to use AI.'); return; }
     setOpen(true);
     setPhase('idle');
     setResponse('');
@@ -342,7 +338,7 @@ function JarvisFab({
 export default function TodayScreen() {
   const c = useColors();
   const { blocks, load: loadSchedule } = useScheduleStore();
-  const { userName, apiKey, groqApiKey, ollamaUrl, ollamaModel, provider, customCategories, weekStartDay } = useSettingsStore();
+  const { userName, groqApiKey, customCategories, weekStartDay } = useSettingsStore();
   const { events: localEvents, load: loadLocalEvents, deleteEvent: deleteLocalEvent } = useLocalEventStore();
 
   const [now, setNow] = useState(new Date());
@@ -709,10 +705,7 @@ export default function TodayScreen() {
 
       {/* Jarvis FAB */}
       <View style={{ paddingVertical: 10, alignItems: 'center', backgroundColor: c.bg, borderTopWidth: 1, borderTopColor: c.border }}>
-        <JarvisFab
-          apiKey={apiKey} groqApiKey={groqApiKey} ollamaUrl={ollamaUrl} ollamaModel={ollamaModel}
-          provider={provider} userName={userName} onActionChange={setFabActionLabel}
-        />
+        <JarvisFab groqApiKey={groqApiKey} userName={userName} onActionChange={setFabActionLabel} />
       </View>
 
       {/* Day detail popup — backdrop fades in instantly, sheet slides up */}

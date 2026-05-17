@@ -19,6 +19,7 @@ function BrowseTabButton() {
 
   const ITEMS: BrowseItem[] = [
     { label: 'Calendar', icon: 'calendar-outline',      route: '/(tabs)/calendar', color: '#5B8FD4' },
+    { label: 'Email',    icon: 'mail-outline',           route: '/(tabs)/email',    color: '#6DB87A' },
     { label: 'Notes',    icon: 'document-text-outline', route: '/(tabs)/notes',    color: '#D4A574' },
     { label: 'Mood',     icon: 'happy-outline',         route: '/(tabs)/mood',     color: '#A78BFA' },
     { label: 'Settings', icon: 'settings-outline',      route: '/(tabs)/settings', color: c.textSecondary },
@@ -151,6 +152,7 @@ export default function TabLayout() {
 
       {/* Hidden — accessible via Browse. display:'none' removes them from flex layout */}
       <Tabs.Screen name="calendar" options={{ tabBarButton: () => null, tabBarItemStyle: { display: 'none' } }} />
+      <Tabs.Screen name="email"    options={{ tabBarButton: () => null, tabBarItemStyle: { display: 'none' } }} />
       <Tabs.Screen name="notes"    options={{ tabBarButton: () => null, tabBarItemStyle: { display: 'none' } }} />
       <Tabs.Screen name="mood"     options={{ tabBarButton: () => null, tabBarItemStyle: { display: 'none' } }} />
       <Tabs.Screen name="settings" options={{ tabBarButton: () => null, tabBarItemStyle: { display: 'none' } }} />
