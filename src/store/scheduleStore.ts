@@ -1,15 +1,15 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Category } from '../theme/colors';
 
 export type DayOfWeek = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
 export interface TimeBlock {
   id: string;
   title: string;
+  description: string;
   startTime: string; // "HH:MM"
   endTime: string;   // "HH:MM"
-  category: Category;
+  category: string;
   daysOfWeek: DayOfWeek[];
   isFixed: boolean;
   reminder: boolean;
@@ -19,6 +19,7 @@ const DEFAULT_BLOCKS: TimeBlock[] = [
   {
     id: '1',
     title: 'Morning Training',
+    description: '',
     startTime: '06:00',
     endTime: '07:30',
     category: 'training',
@@ -29,6 +30,7 @@ const DEFAULT_BLOCKS: TimeBlock[] = [
   {
     id: '2',
     title: 'Deep Work',
+    description: '',
     startTime: '09:00',
     endTime: '12:00',
     category: 'work',
@@ -39,6 +41,7 @@ const DEFAULT_BLOCKS: TimeBlock[] = [
   {
     id: '3',
     title: 'Lunch & Nutrition',
+    description: '',
     startTime: '12:00',
     endTime: '13:00',
     category: 'nutrition',
@@ -49,6 +52,7 @@ const DEFAULT_BLOCKS: TimeBlock[] = [
   {
     id: '4',
     title: 'Learning Block',
+    description: '',
     startTime: '14:00',
     endTime: '15:30',
     category: 'learning',
@@ -59,6 +63,7 @@ const DEFAULT_BLOCKS: TimeBlock[] = [
   {
     id: '5',
     title: 'Personal Time',
+    description: '',
     startTime: '18:00',
     endTime: '20:00',
     category: 'personal',
@@ -69,6 +74,7 @@ const DEFAULT_BLOCKS: TimeBlock[] = [
   {
     id: '6',
     title: 'Wind Down',
+    description: '',
     startTime: '21:30',
     endTime: '22:30',
     category: 'rest',
@@ -97,7 +103,12 @@ export const useScheduleStore = create<ScheduleStore>((set, get) => ({
     try {
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
       const blocks = raw ? JSON.parse(raw) : DEFAULT_BLOCKS;
-      set({ blocks, loaded: true });
+      // Backfill description for blocks loaded before it was added
+      const migrated = blocks.map((b: TimeBlock) => ({
+        ...b,
+        description: b.description ?? '',
+      }));
+      set({ blocks: migrated, loaded: true });
     } catch {
       set({ blocks: DEFAULT_BLOCKS, loaded: true });
     }
@@ -105,8 +116,7 @@ export const useScheduleStore = create<ScheduleStore>((set, get) => ({
 
   addBlock: (block) => {
     const id = Date.now().toString();
-    const newBlock = { ...block, id };
-    const blocks = [...get().blocks, newBlock];
+    const blocks = [...get().blocks, { ...block, id }];
     set({ blocks });
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(blocks));
   },
@@ -126,6 +136,12 @@ export const useScheduleStore = create<ScheduleStore>((set, get) => ({
 
 export function getTodayBlocks(blocks: TimeBlock[]): TimeBlock[] {
   const day = new Date().getDay() as DayOfWeek;
+  return blocks
+    .filter((b) => b.daysOfWeek.includes(day))
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
+}
+
+export function getBlocksForDay(blocks: TimeBlock[], day: DayOfWeek): TimeBlock[] {
   return blocks
     .filter((b) => b.daysOfWeek.includes(day))
     .sort((a, b) => a.startTime.localeCompare(b.startTime));

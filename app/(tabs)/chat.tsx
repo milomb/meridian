@@ -3,7 +3,6 @@ import {
   View,
   Text,
   ScrollView,
-  StyleSheet,
   TouchableOpacity,
   TextInput,
   KeyboardAvoidingView,
@@ -12,233 +11,298 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import Anthropic from '@anthropic-ai/sdk';
+import { router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import * as Speech from 'expo-speech';
 import { Audio } from 'expo-av';
-import { colors } from '../../src/theme/colors';
-
-const API_KEY_STORAGE = '@meridian:anthropic_key';
+import { useColors } from '../../src/theme/colors';
+import { useSettingsStore } from '../../src/store/settingsStore';
+import { sendAIMessage, AIMessage } from '../../src/utils/ai';
+import { parseAIResponse, executeAction, buildSystemPrompt, getActionLabel, AIAction } from '../../src/utils/aiActions';
 
 interface Message {
   id: string;
   role: 'user' | 'assistant';
-  content: string;
+  content: string;     // shown to user
+  rawContent?: string; // full raw AI response — sent back in history so AI keeps context
   timestamp: Date;
+  actionResult?: string;
 }
 
-function MessageBubble({ message }: { message: Message }) {
+let bestVoiceId: string | undefined;
+async function getBestVoice() {
+  if (bestVoiceId !== undefined) return bestVoiceId;
+  try {
+    const voices = await Speech.getAvailableVoicesAsync();
+    const en = voices.filter((v) => v.language?.startsWith('en'));
+    const premium = en.find((v) => /premium|enhanced|siri/i.test(v.name ?? ''));
+    bestVoiceId = premium?.identifier ?? en[0]?.identifier ?? '';
+  } catch {
+    bestVoiceId = '';
+  }
+  return bestVoiceId;
+}
+
+async function speakText(text: string, onDone: () => void) {
+  try {
+    await Audio.setAudioModeAsync({ playsInSilentModeIOS: true, staysActiveInBackground: false });
+  } catch {}
+  const voice = await getBestVoice();
+  Speech.speak(text, {
+    rate: 0.9,
+    pitch: 1.0,
+    language: 'en-US',
+    ...(voice ? { voice } : {}),
+    onDone,
+    onError: onDone,
+  });
+}
+
+function MessageBubble({ message, c }: { message: Message; c: any }) {
   const isUser = message.role === 'user';
   return (
-    <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAssistant]}>
-      <Text style={[styles.bubbleText, isUser ? styles.bubbleTextUser : styles.bubbleTextAssistant]}>
-        {message.content}
-      </Text>
-      <Text style={styles.bubbleTime}>
-        {message.timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
-      </Text>
+    <View style={{ alignSelf: isUser ? 'flex-end' : 'flex-start', maxWidth: '85%', gap: 5 }}>
+      <View style={{
+        borderRadius: 18,
+        padding: 12,
+        backgroundColor: isUser ? c.primary : c.surface,
+        borderWidth: isUser ? 0 : 1,
+        borderColor: c.border,
+        borderBottomRightRadius: isUser ? 4 : 18,
+        borderBottomLeftRadius: isUser ? 18 : 4,
+      }}>
+        <Text style={{
+          fontSize: 15, lineHeight: 22, fontWeight: '400',
+          color: isUser ? (c.isDark ? c.bg : '#fff') : c.text,
+        }}>
+          {message.content}
+        </Text>
+        <Text style={{
+          fontSize: 10, marginTop: 4,
+          color: isUser ? (c.isDark ? c.bg + '99' : '#ffffff88') : c.textMuted,
+          alignSelf: 'flex-end',
+        }}>
+          {message.timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+        </Text>
+      </View>
+      {message.actionResult && (
+        <View style={{
+          backgroundColor: c.success + '18',
+          borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6,
+          borderWidth: 1, borderColor: c.success + '40',
+          flexDirection: 'row', alignItems: 'center', gap: 6,
+        }}>
+          <Ionicons name="checkmark-circle" size={14} color={c.success} />
+          <Text style={{ color: c.success, fontSize: 12, fontWeight: '500' }}>
+            {message.actionResult}
+          </Text>
+        </View>
+      )}
     </View>
   );
 }
 
 export default function ChatScreen() {
+  const c = useColors();
+  const { apiKey, groqApiKey, ollamaUrl, ollamaModel, provider, userName } = useSettingsStore();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [apiKey, setApiKey] = useState('');
-  const [showKeyInput, setShowKeyInput] = useState(false);
-  const [keyInput, setKeyInput] = useState('');
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [pendingAction, setPendingAction] = useState<AIAction | null>(null);
   const scrollRef = useRef<ScrollView>(null);
 
-  useEffect(() => {
-    AsyncStorage.getItem(API_KEY_STORAGE).then((k) => {
-      if (k) setApiKey(k);
-      else setShowKeyInput(true);
-    });
-  }, []);
+  const activeKey = provider === 'groq' ? groqApiKey : provider === 'ollama' ? ollamaUrl : apiKey;
+  const providerLabel = provider === 'groq' ? 'Groq · Llama 3.3' : provider === 'ollama' ? 'Ollama' : 'Claude';
+  const actionLabel = getActionLabel(pendingAction ?? undefined);
 
-  const saveKey = async () => {
-    if (!keyInput.trim()) return;
-    await AsyncStorage.setItem(API_KEY_STORAGE, keyInput.trim());
-    setApiKey(keyInput.trim());
-    setShowKeyInput(false);
-  };
+  // Prefetch voice on mount
+  useEffect(() => { getBestVoice(); }, []);
 
   const sendMessage = async (text: string) => {
     if (!text.trim() || loading) return;
-    if (!apiKey) { setShowKeyInput(true); return; }
+    if (!activeKey) {
+      Alert.alert('No AI configured', 'Add a key or Ollama URL in Browse → Settings.', [
+        { text: 'Settings', onPress: () => router.push('/(tabs)/settings' as any) },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+      return;
+    }
 
+    const trimmed = text.trim();
     const userMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
-      content: text.trim(),
+      content: trimmed,
       timestamp: new Date(),
     };
+
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setLoading(true);
 
     try {
-      const client = new Anthropic({ apiKey });
-      const history = [...messages, userMsg].map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
+      // Use rawContent for AI history so it keeps full action context across turns
+      const history: AIMessage[] = [...messages, userMsg].map((m) => ({
+        role: m.role,
+        content: m.rawContent ?? m.content,
       }));
 
-      const response = await client.messages.create({
-        model: 'claude-opus-4-5',
-        max_tokens: 1024,
-        system:
-          'You are Meridian AI, a personal productivity and wellness assistant. Help the user with scheduling, habits, goals, and personal development. Be concise, warm, and actionable.',
-        messages: history,
-      });
+      const system = buildSystemPrompt(userName);
+      const raw = await sendAIMessage(history, system, provider, apiKey, groqApiKey, 800, ollamaUrl, ollamaModel);
+      const parsed = parseAIResponse(raw);
 
-      const assistantText =
-        response.content[0].type === 'text' ? response.content[0].text : '';
+      // Execute if ready, else track pending
+      let actionResult: string | undefined;
+      if (parsed.action && parsed.action.type !== 'NONE') {
+        const result = executeAction(parsed.action);
+        if (result) {
+          actionResult = result;
+          setPendingAction(null);
+        } else {
+          setPendingAction(parsed.action);
+        }
+      } else {
+        setPendingAction(null);
+      }
 
       const assistantMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: assistantText,
+        content: parsed.message,
+        rawContent: raw, // ← full JSON kept for AI history
         timestamp: new Date(),
+        actionResult,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err: any) {
-      Alert.alert('Error', err.message ?? 'Failed to get response');
+      setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
+      setInput(trimmed);
+      Alert.alert('Failed to send', err.message ?? 'Something went wrong.');
     } finally {
       setLoading(false);
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
     }
   };
 
-  const startRecording = async () => {
-    try {
-      await Audio.requestPermissionsAsync();
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-      setRecording(recording);
-    } catch {
-      Alert.alert('Error', 'Could not start recording');
-    }
-  };
-
-  const stopRecording = async () => {
-    if (!recording) return;
-    await recording.stopAndUnloadAsync();
-    setRecording(null);
-    // Without Whisper integration, prompt user to type
-    Alert.alert('Voice Input', 'Voice transcription requires a Whisper API integration. Type your message instead.');
-  };
-
-  const speakLastMessage = () => {
+  const speakLast = () => {
     const last = [...messages].reverse().find((m) => m.role === 'assistant');
     if (!last) return;
-    if (isSpeaking) {
-      Speech.stop();
-      setIsSpeaking(false);
-      return;
-    }
+    if (isSpeaking) { Speech.stop(); setIsSpeaking(false); return; }
     setIsSpeaking(true);
-    Speech.speak(last.content, {
-      onDone: () => setIsSpeaking(false),
-      onError: () => setIsSpeaking(false),
-      rate: 0.95,
-      pitch: 1.0,
-    });
+    speakText(last.content, () => setIsSpeaking(false));
   };
 
-  if (showKeyInput) {
-    return (
-      <SafeAreaView style={styles.safe} edges={['top']}>
-        <View style={styles.keySetup}>
-          <Text style={styles.keyTitle}>Anthropic API Key</Text>
-          <Text style={styles.keySubtitle}>
-            Enter your key to enable AI Chat. It's stored locally on your device.
-          </Text>
-          <TextInput
-            style={styles.keyInput}
-            value={keyInput}
-            onChangeText={setKeyInput}
-            placeholder="sk-ant-..."
-            placeholderTextColor={colors.textMuted}
-            autoCapitalize="none"
-            autoCorrect={false}
-            secureTextEntry
-          />
-          <TouchableOpacity onPress={saveKey} style={styles.keyBtn}>
-            <Text style={styles.keyBtnText}>Save Key</Text>
-          </TouchableOpacity>
-          {apiKey && (
-            <TouchableOpacity onPress={() => setShowKeyInput(false)} style={styles.keySkip}>
-              <Text style={styles.keySkipText}>Cancel</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      </SafeAreaView>
-    );
-  }
+  const clearChat = () => {
+    setMessages([]);
+    setPendingAction(null);
+  };
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
-      <View style={styles.chatHeader}>
-        <Text style={styles.title}>AI Chat</Text>
-        <View style={styles.chatHeaderRight}>
-          <TouchableOpacity onPress={speakLastMessage} style={styles.iconBtn}>
-            <Text style={styles.iconBtnText}>{isSpeaking ? '🔇' : '🔊'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => setShowKeyInput(true)} style={styles.iconBtn}>
-            <Text style={styles.iconBtnText}>🔑</Text>
+    <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
+      {/* Header */}
+      <View style={{
+        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+        paddingHorizontal: 20, paddingVertical: 12,
+      }}>
+        <View>
+          <Text style={{ color: c.text, fontSize: 22, fontWeight: '600' }}>AI Chat</Text>
+          <Text style={{ color: activeKey ? c.textMuted : c.error, fontSize: 11, marginTop: 1, fontWeight: '400' }}>
+            {providerLabel}{activeKey ? '' : ' · no key set'}
+          </Text>
+        </View>
+        <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+          {messages.length > 0 && (
+            <TouchableOpacity onPress={clearChat} style={{ padding: 6 }}>
+              <Ionicons name="trash-outline" size={18} color={c.textMuted} />
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity
+            onPress={speakLast}
+            style={{
+              width: 36, height: 36, borderRadius: 18,
+              backgroundColor: c.surface, borderWidth: 1, borderColor: c.border,
+              alignItems: 'center', justifyContent: 'center',
+            }}
+          >
+            <Ionicons name={isSpeaking ? 'volume-mute-outline' : 'volume-high-outline'} size={18} color={c.primary} />
           </TouchableOpacity>
         </View>
       </View>
 
-      <KeyboardAvoidingView
-        style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={0}
-      >
+      {/* Status banner — shows while building an action */}
+      {actionLabel && (
+        <View style={{
+          flexDirection: 'row', alignItems: 'center', gap: 8,
+          backgroundColor: c.primaryFaint, borderBottomWidth: 1, borderBottomColor: c.border,
+          paddingHorizontal: 20, paddingVertical: 8,
+        }}>
+          <ActivityIndicator size="small" color={c.primary} />
+          <Text style={{ color: c.primary, fontSize: 13, fontWeight: '500' }}>{actionLabel}</Text>
+        </View>
+      )}
+
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView
           ref={scrollRef}
-          style={styles.messages}
-          contentContainerStyle={styles.messagesContent}
+          style={{ flex: 1 }}
+          contentContainerStyle={{ padding: 16, paddingBottom: 8, gap: 10 }}
           showsVerticalScrollIndicator={false}
           onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
         >
           {messages.length === 0 && (
-            <View style={styles.emptyChat}>
-              <Text style={styles.emptyChatText}>Hello! I'm Meridian AI.</Text>
-              <Text style={styles.emptyChatSub}>Ask me about your schedule, habits, or goals.</Text>
+            <View style={{ alignItems: 'center', marginTop: 60, gap: 10 }}>
+              <Text style={{ color: c.text, fontSize: 18, fontWeight: '500' }}>
+                {userName ? `Hey ${userName.split(' ')[0]}! 👋` : 'Hey there! 👋'}
+              </Text>
+              <Text style={{ color: c.textSecondary, fontSize: 14, textAlign: 'center', lineHeight: 21, fontWeight: '400' }}>
+                {"Ask me anything — 'what's today look like?', 'create a workout block', or just chat."}
+              </Text>
+              {!activeKey && (
+                <TouchableOpacity
+                  onPress={() => router.push('/(tabs)/settings' as any)}
+                  style={{
+                    backgroundColor: c.primaryFaint, borderRadius: 12,
+                    paddingHorizontal: 20, paddingVertical: 10,
+                    borderWidth: 1, borderColor: c.primary + '60', marginTop: 8,
+                  }}
+                >
+                  <Text style={{ color: c.primary, fontSize: 14, fontWeight: '500' }}>Set up AI →</Text>
+                </TouchableOpacity>
+              )}
             </View>
           )}
-          {messages.map((m) => (
-            <MessageBubble key={m.id} message={m} />
-          ))}
+
+          {messages.map((m) => <MessageBubble key={m.id} message={m} c={c} />)}
+
           {loading && (
-            <View style={styles.loadingBubble}>
-              <ActivityIndicator color={colors.primary} size="small" />
-              <Text style={styles.loadingText}>Thinking…</Text>
+            <View style={{
+              alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 8,
+              backgroundColor: c.surface, borderRadius: 18, padding: 12,
+              borderWidth: 1, borderColor: c.border,
+            }}>
+              <ActivityIndicator color={c.primary} size="small" />
+              <Text style={{ color: c.textSecondary, fontSize: 14, fontWeight: '400' }}>…</Text>
             </View>
           )}
         </ScrollView>
 
-        <View style={styles.inputBar}>
-          <TouchableOpacity
-            onPressIn={startRecording}
-            onPressOut={stopRecording}
-            style={[styles.voiceBtn, recording && styles.voiceBtnActive]}
-          >
-            <Text style={styles.voiceBtnText}>{recording ? '⏹' : '🎙'}</Text>
-          </TouchableOpacity>
+        <View style={{
+          flexDirection: 'row', alignItems: 'flex-end',
+          padding: 12, borderTopWidth: 1, borderTopColor: c.border, gap: 8,
+          backgroundColor: c.bg,
+        }}>
           <TextInput
-            style={styles.inputField}
+            style={{
+              flex: 1, backgroundColor: c.surface, borderRadius: 22,
+              borderWidth: 1, borderColor: c.border,
+              paddingHorizontal: 16, paddingVertical: 10,
+              color: c.text, fontSize: 15, maxHeight: 120, fontWeight: '400',
+            }}
             value={input}
             onChangeText={setInput}
-            placeholder="Message Meridian…"
-            placeholderTextColor={colors.textMuted}
+            placeholder={pendingAction ? 'Reply to continue…' : "Message Meridian…"}
+            placeholderTextColor={c.textMuted}
             multiline
             maxLength={2000}
             returnKeyType="send"
@@ -246,146 +310,17 @@ export default function ChatScreen() {
           />
           <TouchableOpacity
             onPress={() => sendMessage(input)}
-            style={[styles.sendBtn, (!input.trim() || loading) && styles.sendBtnDisabled]}
+            style={{
+              width: 40, height: 40, borderRadius: 20,
+              backgroundColor: (!input.trim() || loading) ? c.border : c.primary,
+              alignItems: 'center', justifyContent: 'center',
+            }}
             disabled={!input.trim() || loading}
           >
-            <Text style={styles.sendBtnText}>↑</Text>
+            <Ionicons name="arrow-up" size={18} color={c.isDark ? c.bg : '#fff'} />
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.bg },
-  flex: { flex: 1 },
-  chatHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-  },
-  title: { color: colors.text, fontSize: 28, fontWeight: '700' },
-  chatHeaderRight: { flexDirection: 'row', gap: 8 },
-  iconBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  iconBtnText: { fontSize: 16 },
-  messages: { flex: 1 },
-  messagesContent: { padding: 16, paddingBottom: 8, gap: 10 },
-  emptyChat: { alignItems: 'center', marginTop: 60 },
-  emptyChatText: { color: colors.text, fontSize: 18, fontWeight: '600' },
-  emptyChatSub: { color: colors.textSecondary, fontSize: 14, marginTop: 6, textAlign: 'center' },
-  bubble: {
-    maxWidth: '82%',
-    borderRadius: 16,
-    padding: 12,
-  },
-  bubbleUser: {
-    alignSelf: 'flex-end',
-    backgroundColor: colors.primary,
-    borderBottomRightRadius: 4,
-  },
-  bubbleAssistant: {
-    alignSelf: 'flex-start',
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderBottomLeftRadius: 4,
-  },
-  bubbleText: { fontSize: 15, lineHeight: 22 },
-  bubbleTextUser: { color: colors.bg },
-  bubbleTextAssistant: { color: colors.text },
-  bubbleTime: { fontSize: 10, marginTop: 4, color: colors.textMuted, alignSelf: 'flex-end' },
-  loadingBubble: {
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  loadingText: { color: colors.textSecondary, fontSize: 14 },
-  inputBar: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    padding: 12,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    gap: 8,
-    backgroundColor: colors.bg,
-  },
-  voiceBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  voiceBtnActive: { backgroundColor: colors.error + '30', borderColor: colors.error },
-  voiceBtnText: { fontSize: 18 },
-  inputField: {
-    flex: 1,
-    backgroundColor: colors.surface,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    color: colors.text,
-    fontSize: 15,
-    maxHeight: 120,
-  },
-  sendBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sendBtnDisabled: { backgroundColor: colors.border },
-  sendBtnText: { color: colors.bg, fontSize: 18, fontWeight: '700' },
-  // Key setup
-  keySetup: {
-    flex: 1,
-    padding: 32,
-    justifyContent: 'center',
-  },
-  keyTitle: { color: colors.text, fontSize: 24, fontWeight: '700', marginBottom: 12 },
-  keySubtitle: { color: colors.textSecondary, fontSize: 15, lineHeight: 22, marginBottom: 28 },
-  keyInput: {
-    backgroundColor: colors.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 16,
-    color: colors.text,
-    fontSize: 15,
-    marginBottom: 16,
-  },
-  keyBtn: {
-    backgroundColor: colors.primary,
-    borderRadius: 12,
-    padding: 16,
-    alignItems: 'center',
-  },
-  keyBtnText: { color: colors.bg, fontSize: 16, fontWeight: '700' },
-  keySkip: { marginTop: 12, alignItems: 'center' },
-  keySkipText: { color: colors.textSecondary, fontSize: 15 },
-});
