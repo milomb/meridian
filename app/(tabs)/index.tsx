@@ -13,15 +13,115 @@ import { sendMessageWithTools, ChatMessage, ProviderConfig } from '../../src/ai/
 import { useColors, getCategoryColor } from '../../src/theme/colors';
 import {
   useScheduleStore, getCurrentBlock, getUpcomingBlocks,
-  getTodayBlocks, DayOfWeek,
+  getTodayBlocks, DayOfWeek, TimeBlock,
 } from '../../src/store/scheduleStore';
 import { useSettingsStore, WeekStartDay } from '../../src/store/settingsStore';
 import { useLocalEventStore, LocalEvent } from '../../src/store/localEventStore';
 import { CurrentBlockBanner } from '../../src/components/CurrentBlockBanner';
+import { router } from 'expo-router';
+import {
+  usePerformanceStore, computeDailyScore, getScoreColor, getScoreLabel, todayDateKey, fmtDateKey,
+} from '../../src/store/performanceStore';
+import { useResolutionStore } from '../../src/store/resolutionStore';
+import { useHealthKit } from '../../src/utils/healthKit';
+import { initAIDataLayer } from '../../src/utils/aiDataLayer';
 
 const { width: SW } = Dimensions.get('window');
 const WEEK_CENTER = 50;
 const TOTAL_WEEKS = 101;
+const MAX_WEEK_OFFSET = 12; // ±3 months
+
+const READINESS_COLORS: Record<string, string> = {
+  energised: '#3EB87A',
+  good: '#5B8FD4',
+  average: '#D4A574',
+  drained: '#E05C5C',
+};
+
+const JARVIS_BRIEF_SYSTEM = "You are Jarvis, a concise personal assistant. Given the user's day, deliver a 2–3 sentence morning brief: acknowledge what's ahead, note anything worth flagging, end with one practical nudge. Be direct, not cheerful.";
+
+let briefFiredThisSession = false;
+
+function fmtHHMM(d: Date): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// Small segment ring for home widget
+function MiniScoreRing({ score, size = 80, segments = 40 }: { score: number; size?: number; segments?: number }) {
+  const strokeWidth = 8;
+  const color = getScoreColor(score);
+  const pct = Math.max(0, Math.min(100, score)) / 100;
+  const filled = Math.round(pct * segments);
+  const r = size / 2 - strokeWidth / 2 - 1;
+  const arcLen = (2 * Math.PI * r) / segments;
+  const segH = arcLen * 0.76;
+  const segW = strokeWidth * 0.62;
+
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ position: 'absolute', width: size, height: size }}>
+        {Array.from({ length: segments }, (_, i) => {
+          const angleDeg = (i / segments) * 360 - 90;
+          const angleRad = angleDeg * (Math.PI / 180);
+          const cx = size / 2 + r * Math.cos(angleRad);
+          const cy = size / 2 + r * Math.sin(angleRad);
+          return (
+            <View
+              key={i}
+              style={{
+                position: 'absolute',
+                width: segW,
+                height: segH,
+                borderRadius: segW / 2,
+                left: cx - segW / 2,
+                top: cy - segH / 2,
+                backgroundColor: i < filled ? color : 'rgba(255,255,255,0.07)',
+                transform: [{ rotate: `${angleDeg}deg` }],
+              }}
+            />
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+async function fetchMorningBrief(
+  groqKey: string,
+  userName: string,
+  events: { title: string; startDate: Date; isAllDay?: boolean }[],
+  readiness: string | null,
+): Promise<string> {
+  const firstName = userName ? userName.split(' ')[0] : 'there';
+  const eventSummary = events.length > 0
+    ? events
+        .sort((a, b) => a.startDate.getTime() - b.startDate.getTime())
+        .map((e) =>
+          e.isAllDay
+            ? `- ${e.title} (all day)`
+            : `- ${e.title} at ${e.startDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`
+        )
+        .join('\n')
+    : 'No events scheduled';
+
+  const userMsg = `Name: ${firstName}\nReadiness: ${readiness ?? 'not logged'}\nToday's events:\n${eventSummary}`;
+
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${groqKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: JARVIS_BRIEF_SYSTEM },
+        { role: 'user', content: userMsg },
+      ],
+      max_tokens: 150,
+    }),
+  });
+  if (!res.ok) throw new Error('Brief unavailable');
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content ?? '';
+}
 
 // ── Helpers ────────────────────────────────────────────────────
 function getWeekDays(offset: number, startDay: WeekStartDay = 'monday'): Date[] {
@@ -62,9 +162,6 @@ function fmt2(h: number, m: number) {
   const ap = h >= 12 ? 'PM' : 'AM';
   return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${ap}`;
 }
-function fmtDateKey(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
 
 // ── Types ──────────────────────────────────────────────────────
 interface CalEvent {
@@ -88,6 +185,38 @@ function localToCalEvent(local: LocalEvent, baseDate: Date): CalEvent {
   const s = new Date(baseDate); s.setHours(sh, sm, 0, 0);
   const e = new Date(baseDate); e.setHours(eh, em, 0, 0);
   return { id: local.id, title: local.title, startDate: s, endDate: e, color: local.color, isLocal: true };
+}
+
+// ── Busyness ───────────────────────────────────────────────────
+const BUSYNESS_COLORS = { Light: '#6DB87A', Moderate: '#D4A574', Busy: '#E05C5C' } as const;
+type BusyLabel = 'Light' | 'Moderate' | 'Busy';
+
+function getDayBusyness(
+  d: Date,
+  calEventsMap: Map<string, CalEvent[]>,
+  blocks: TimeBlock[],
+  localEvts: LocalEvent[],
+): { label: BusyLabel; color: string } {
+  let mins = 0;
+  (calEventsMap.get(d.toDateString()) ?? []).forEach((e) => {
+    if (!e.isAllDay) mins += (e.endDate.getTime() - e.startDate.getTime()) / 60000;
+  });
+  const dow = d.getDay() as DayOfWeek;
+  blocks.filter((b) => b.daysOfWeek.includes(dow)).forEach((b) => {
+    const [sh, sm] = b.startTime.split(':').map(Number);
+    const [eh, em] = b.endTime.split(':').map(Number);
+    mins += (eh * 60 + em) - (sh * 60 + sm);
+  });
+  const dateKey = fmtDateKey(d);
+  localEvts.filter((e) => e.date === dateKey && !e.isAllDay).forEach((e) => {
+    if (e.startTime && e.endTime) {
+      const [sh, sm] = e.startTime.split(':').map(Number);
+      const [eh, em] = e.endTime.split(':').map(Number);
+      mins += (eh * 60 + em) - (sh * 60 + sm);
+    }
+  });
+  const label: BusyLabel = mins >= 300 ? 'Busy' : mins >= 120 ? 'Moderate' : 'Light';
+  return { label, color: BUSYNESS_COLORS[label] };
 }
 
 // ── ProgressPill ───────────────────────────────────────────────
@@ -352,12 +481,65 @@ export default function TodayScreen() {
   const [calGranted, setCalGranted] = useState(false);
   const [fabActionLabel, setFabActionLabel] = useState<string | null>(null);
 
+  const {
+    todayEntry: perfEntry, morningDone, eveningDone,
+    load: loadPerf, loaded: perfLoaded,
+  } = usePerformanceStore();
+  const { resolutions, loaded: resLoaded, load: loadRes, getResolution, setPending } = useResolutionStore();
+  const { stepGoal, sleepTarget } = useSettingsStore();
+  const { steps, sleepHours } = useHealthKit();
+  const calEventsRef = useRef<Map<string, CalEvent[]>>(new Map());
+  const [briefText, setBriefText] = useState<string | null>(null);
+  const [briefLoading, setBriefLoading] = useState(false);
+  const [briefDismissed, setBriefDismissed] = useState(false);
+  const [briefTrigger, setBriefTrigger] = useState(0);
+  // No dismiss state — banner always shows while there are unresolved past blocks
+
   // Animation refs for the day popup: backdrop fades in, sheet slides up
   const sheetAnim = useRef(new Animated.Value(400)).current;
   const backdropAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => { const id = setInterval(() => setNow(new Date()), 30000); return () => clearInterval(id); }, []);
-  useEffect(() => { loadSchedule(); loadLocalEvents(); getBestVoice(); }, []);
+  useEffect(() => { loadSchedule(); loadLocalEvents(); getBestVoice(); loadPerf(); loadRes(); initAIDataLayer(); }, []);
+
+  // Always-reactive unresolved items — re-evaluates whenever blocks/resolutions/time change
+  const unresolvedItems = useMemo(() => {
+    if (!resLoaded) return [];
+    const today = new Date();
+    const todayKey = todayDateKey();
+    const nowHHMM = fmtHHMM(today);
+    const todayDow = today.getDay();
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const yesterdayKey = fmtDateKey(yesterday);
+    const yesterdayDow = yesterday.getDay();
+
+    const items: { blockId: string; date: string; startTime: string }[] = [];
+    blocks.forEach((b) => {
+      if (b.daysOfWeek.includes(todayDow as DayOfWeek) && b.endTime <= nowHHMM && !getResolution(b.id, todayKey)) {
+        items.push({ blockId: b.id, date: todayKey, startTime: b.startTime });
+      }
+      if (b.daysOfWeek.includes(yesterdayDow as DayOfWeek) && !getResolution(b.id, yesterdayKey)) {
+        items.push({ blockId: b.id, date: yesterdayKey, startTime: b.startTime });
+      }
+    });
+    // Sort: yesterday's blocks first, then by startTime
+    return items.sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime));
+  }, [resLoaded, blocks, resolutions, now]);
+
+  useEffect(() => {
+    if (!groqApiKey) return;
+    if (briefTrigger === 0 && briefFiredThisSession) return;
+    briefFiredThisSession = true;
+    setBriefDismissed(false);
+    setBriefLoading(true);
+    setBriefText(null);
+    const todayKey = new Date().toDateString();
+    const events = calEventsRef.current.get(todayKey) ?? [];
+    fetchMorningBrief(groqApiKey, userName, events, perfEntry?.state ?? null)
+      .then((text) => { setBriefText(text); setBriefLoading(false); })
+      .catch(() => setBriefLoading(false));
+  }, [groqApiKey, briefTrigger]);
   useEffect(() => {
     Calendar.getCalendarPermissionsAsync().then(({ status }) => {
       if (status === 'granted') { setCalGranted(true); fetchWeekEvents(0); }
@@ -409,6 +591,7 @@ export default function TodayScreen() {
       setCalEvents((prev) => {
         const merged = new Map(prev);
         incoming.forEach((v, k) => merged.set(k, v));
+        calEventsRef.current = merged;
         return merged;
       });
     } catch {}
@@ -416,7 +599,11 @@ export default function TodayScreen() {
 
   const onMomentumScrollEnd = useCallback((e: any) => {
     const page = Math.round(e.nativeEvent.contentOffset.x / SW);
-    setWeekIdx(page);
+    const clamped = Math.max(WEEK_CENTER - MAX_WEEK_OFFSET, Math.min(WEEK_CENTER + MAX_WEEK_OFFSET, page));
+    if (clamped !== page) {
+      flatListRef.current?.scrollToIndex({ index: clamped, animated: true });
+    }
+    setWeekIdx(clamped);
   }, []);
 
   const getItemLayout = useCallback((_: any, index: number) => ({
@@ -463,6 +650,8 @@ export default function TodayScreen() {
   const todayStr = now.toDateString();
   const currentBlock = getCurrentBlock(blocks);
   const upcomingBlocks = getUpcomingBlocks(blocks, 3);
+  const nowTimeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const todayBlocks = getTodayBlocks(blocks);
 
   // Merge Apple Calendar events + local events for today
   const todayLocalEvts: CalEvent[] = localEvents
@@ -483,6 +672,23 @@ export default function TodayScreen() {
   const weekOfYear = getWeekOfYear() + weekOffset;
   const dayPct = getDayPct();
   const firstName = userName ? userName.split(' ')[0] : '';
+
+  // Score for widget
+  const todayKey = todayDateKey();
+  const todayDowNum = now.getDay();
+  const todayBlocksForScore = getTodayBlocks(blocks);
+  const blockWeightedTotal = todayBlocksForScore.reduce((s, b) => s + (b.weight ?? 2), 0);
+  const blockWeightedDone = todayBlocksForScore
+    .filter((b) => getResolution(b.id, todayKey)?.status === 'done')
+    .reduce((s, b) => s + (b.weight ?? 2), 0);
+  const widgetScore = computeDailyScore({
+    morningDone, eveningDone,
+    blockWeightedDone, blockWeightedTotal,
+    steps, sleepHours, stepGoal, sleepTarget,
+  });
+  const widgetScoreColor = getScoreColor(widgetScore);
+  const beforeNine = now.getHours() < 9;
+  const widgetShowStart = beforeNine && widgetScore === 0;
   const greeting = now.getHours() < 5 ? 'Good night' : now.getHours() < 12 ? 'Good morning' : now.getHours() < 17 ? 'Good afternoon' : 'Good evening';
 
   const sameMonth = weekDays[0].getMonth() === weekDays[6].getMonth();
@@ -522,11 +728,17 @@ export default function TodayScreen() {
               <Text style={{ color: isToday ? c.primary : c.text, fontSize: 14, fontWeight: isToday ? '600' : '400' }}>
                 {d.getDate()}
               </Text>
-              <View style={{ height: 5, alignItems: 'center', justifyContent: 'center' }}>
-                {hasEvents && (
-                  <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: isToday ? c.primary : c.primary + '90' }} />
-                )}
-              </View>
+              {(() => {
+                const busy = getDayBusyness(d, calEvents, blocks, localEvents);
+                return (
+                  <View style={{ flexDirection: 'row', gap: 3, alignItems: 'center', justifyContent: 'center', height: 5 }}>
+                    {hasEvents && (
+                      <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: isToday ? c.primary : c.primary + '90' }} />
+                    )}
+                    <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: busy.color + (isToday ? 'FF' : 'AA') }} />
+                  </View>
+                );
+              })()}
             </TouchableOpacity>
           );
         })}
@@ -556,6 +768,25 @@ export default function TodayScreen() {
         </View>
       )}
 
+      {/* Unresolved blocks banner — always visible while there are unresolved past blocks */}
+      {unresolvedItems.length > 0 && (
+        <TouchableOpacity
+          onPress={() => {
+            const first = unresolvedItems[0];
+            setPending(first.blockId, first.date);
+            router.navigate('/(tabs)/schedule' as any);
+          }}
+          style={{ marginHorizontal: 12, marginTop: 8, backgroundColor: '#D4A57420', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderColor: '#D4A574' }}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="alert-circle-outline" size={18} color="#D4A574" />
+          <Text style={{ color: '#D4A574', fontSize: 13, flex: 1, fontWeight: '500' }}>
+            {unresolvedItems.length} unresolved {unresolvedItems.length === 1 ? 'block' : 'blocks'} — tap to resolve.
+          </Text>
+          <Ionicons name="chevron-forward" size={14} color="#D4A574" />
+        </TouchableOpacity>
+      )}
+
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 16 }} showsVerticalScrollIndicator={false}>
         {/* Header */}
         <View style={{ paddingHorizontal: 20, paddingTop: 14, paddingBottom: 8 }}>
@@ -582,19 +813,26 @@ export default function TodayScreen() {
         <View style={{ marginTop: 16 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginBottom: 8 }}>
             <TouchableOpacity
-              onPress={() => { const ni = weekIdx - 1; setWeekIdx(ni); flatListRef.current?.scrollToIndex({ index: ni, animated: true }); }}
+              onPress={() => { const ni = Math.max(WEEK_CENTER - MAX_WEEK_OFFSET, weekIdx - 1); setWeekIdx(ni); flatListRef.current?.scrollToIndex({ index: ni, animated: true }); }}
               style={{ padding: 4 }}
+              disabled={weekIdx <= WEEK_CENTER - MAX_WEEK_OFFSET}
             >
-              <Ionicons name="chevron-back" size={18} color={c.primary} />
+              <Ionicons name="chevron-back" size={18} color={weekIdx <= WEEK_CENTER - MAX_WEEK_OFFSET ? c.border : c.primary} />
             </TouchableOpacity>
-            <Text style={{ color: c.textSecondary, fontSize: 12, fontWeight: '500' }}>
-              {weekLabel} · Wk {weekOfYear}
-            </Text>
             <TouchableOpacity
-              onPress={() => { const ni = weekIdx + 1; setWeekIdx(ni); flatListRef.current?.scrollToIndex({ index: ni, animated: true }); }}
-              style={{ padding: 4 }}
+              onPress={() => { setWeekIdx(WEEK_CENTER); flatListRef.current?.scrollToIndex({ index: WEEK_CENTER, animated: true }); }}
+              activeOpacity={weekOffset !== 0 ? 0.6 : 1}
             >
-              <Ionicons name="chevron-forward" size={18} color={c.primary} />
+              <Text style={{ color: weekOffset !== 0 ? c.primary : c.textSecondary, fontSize: 12, fontWeight: '500' }}>
+                {weekLabel} · Wk {weekOfYear}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => { const ni = Math.min(WEEK_CENTER + MAX_WEEK_OFFSET, weekIdx + 1); setWeekIdx(ni); flatListRef.current?.scrollToIndex({ index: ni, animated: true }); }}
+              style={{ padding: 4 }}
+              disabled={weekIdx >= WEEK_CENTER + MAX_WEEK_OFFSET}
+            >
+              <Ionicons name="chevron-forward" size={18} color={weekIdx >= WEEK_CENTER + MAX_WEEK_OFFSET ? c.border : c.primary} />
             </TouchableOpacity>
           </View>
 
@@ -616,6 +854,16 @@ export default function TodayScreen() {
           />
         </View>
 
+        {/* Today → day timeline */}
+        <TouchableOpacity
+          onPress={() => router.navigate('/(tabs)/schedule' as any)}
+          activeOpacity={0.6}
+          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 6, gap: 3 }}
+        >
+          <Text style={{ color: c.textMuted, fontSize: 11, fontWeight: '500' }}>Today</Text>
+          <Ionicons name="chevron-forward" size={11} color={c.textMuted} />
+        </TouchableOpacity>
+
         {/* Stats */}
         <View style={{ flexDirection: 'row', marginHorizontal: 12, marginTop: 16, backgroundColor: c.surface, borderRadius: 14, padding: 14, borderWidth: 1, borderColor: c.border }}>
           {[{ v: getTodayBlocks(blocks).length, l: 'Blocks' }, { v: upcomingBlocks.length, l: 'Upcoming' }, { v: todayCalEvents.length, l: 'Events' }].map((s, i, a) => (
@@ -628,6 +876,54 @@ export default function TodayScreen() {
             </React.Fragment>
           ))}
         </View>
+
+        {/* Performance Widget */}
+        <TouchableOpacity
+          onPress={() => router.push('/(tabs)/performance')}
+          style={{
+            marginHorizontal: 12, marginTop: 14,
+            backgroundColor: c.surface, borderRadius: 14,
+            padding: 14, borderWidth: 1, borderColor: c.border,
+            flexDirection: 'row', alignItems: 'center', gap: 12,
+          }}
+          activeOpacity={0.7}
+        >
+          <MiniScoreRing score={widgetScore} size={72} segments={40} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: widgetScoreColor, fontSize: 30, fontWeight: '700', letterSpacing: -1 }}>
+              {widgetShowStart ? '—' : widgetScore.toFixed(1)}
+            </Text>
+            {widgetShowStart ? (
+              <Text style={{ color: c.textSecondary, fontSize: 12, marginTop: 1 }}>Start your day</Text>
+            ) : (
+              <>
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+                  <View style={{ backgroundColor: c.surfaceAlt, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3 }}>
+                    <Text style={{ color: steps !== null ? c.textSecondary : c.textMuted, fontSize: 10 }}>
+                      👟 {steps !== null ? `${(steps / 1000).toFixed(1)}k` : '—'}
+                    </Text>
+                  </View>
+                  <View style={{ backgroundColor: c.surfaceAlt, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3 }}>
+                    <Text style={{ color: c.textSecondary, fontSize: 10 }}>
+                      ☀️{morningDone ? '✓' : '✗'} 🌙{eveningDone ? '✓' : '✗'}
+                    </Text>
+                  </View>
+                  <View style={{ backgroundColor: c.surfaceAlt, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3 }}>
+                    <Text style={{ color: sleepHours !== null ? c.textSecondary : c.textMuted, fontSize: 10 }}>
+                      🌙 {sleepHours !== null ? `${sleepHours.toFixed(1)}h` : '—'}
+                    </Text>
+                  </View>
+                </View>
+                {perfEntry && (
+                  <Text style={{ color: c.textMuted, fontSize: 10, marginTop: 4, textTransform: 'capitalize' }}>
+                    {perfEntry.state}
+                  </Text>
+                )}
+              </>
+            )}
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={c.textMuted} />
+        </TouchableOpacity>
 
         {/* Current block */}
         <View style={{ marginHorizontal: 12, marginTop: 14 }}>
@@ -666,22 +962,37 @@ export default function TodayScreen() {
           </View>
         )}
 
-        {/* Coming up */}
-        {upcomingBlocks.length > 0 && (
+        {/* Today's Plan */}
+        {todayBlocks.length > 0 && (
           <View style={{ marginHorizontal: 12, marginTop: 14 }}>
             <Text style={{ color: c.textSecondary, fontSize: 10, fontWeight: '600', letterSpacing: 1.2, textTransform: 'uppercase', marginBottom: 8 }}>
-              Coming Up
+              Today's Plan
             </Text>
-            {upcomingBlocks.map((b) => {
+            {todayBlocks.map((b) => {
               const catColor = getCategoryColor(b.category, customCategories, c);
+              const isPast = b.endTime <= nowTimeStr;
+              const isCurrent = b.startTime <= nowTimeStr && b.endTime > nowTimeStr;
               return (
-                <View key={b.id} style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: c.surface, borderRadius: 10, padding: 11, marginBottom: 6, borderWidth: 1, borderColor: c.border, gap: 10 }}>
-                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: catColor }} />
+                <View
+                  key={b.id}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', backgroundColor: c.surface,
+                    borderRadius: 10, padding: 11, marginBottom: 6, gap: 10,
+                    borderWidth: 1, borderColor: isCurrent ? catColor + '60' : c.border,
+                    opacity: isPast ? 0.45 : 1,
+                  }}
+                >
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isCurrent ? catColor : catColor + '80' }} />
                   <View style={{ flex: 1 }}>
-                    <Text style={{ color: c.text, fontSize: 13, fontWeight: '500' }}>{b.title}</Text>
-                    <Text style={{ color: c.textSecondary, fontSize: 11, marginTop: 1 }}>{b.startTime} – {b.endTime}</Text>
+                    <Text style={{ color: isPast ? c.textSecondary : c.text, fontSize: 13, fontWeight: isCurrent ? '600' : '400' }}>
+                      {b.title}
+                    </Text>
+                    <Text style={{ color: c.textMuted, fontSize: 11, marginTop: 1 }}>{b.startTime} – {b.endTime}</Text>
                   </View>
-                  <Text style={{ color: catColor, fontSize: 10, fontWeight: '500', textTransform: 'capitalize' }}>{b.category}</Text>
+                  {isCurrent
+                    ? <Text style={{ color: catColor, fontSize: 10, fontWeight: '600' }}>Now</Text>
+                    : <Text style={{ color: isPast ? c.textMuted : catColor, fontSize: 10, fontWeight: '500', textTransform: 'capitalize' }}>{b.category}</Text>
+                  }
                 </View>
               );
             })}
@@ -738,6 +1049,14 @@ export default function TodayScreen() {
                 <Text style={{ color: c.text, fontSize: 18, fontWeight: '600' }}>
                   {selectedDate?.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
                 </Text>
+                {selectedDate && (() => {
+                  const busy = getDayBusyness(selectedDate, calEvents, blocks, localEvents);
+                  return (
+                    <Text style={{ color: busy.color, fontSize: 12, fontWeight: '600', marginTop: 3 }}>
+                      {busy.label === 'Light' ? 'Light day' : busy.label}
+                    </Text>
+                  );
+                })()}
                 <Text style={{ color: c.textSecondary, fontSize: 12, marginTop: 2 }}>
                   {selectedCalEvents.length === 0
                     ? 'No calendar events'

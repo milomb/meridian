@@ -62,6 +62,7 @@ export function executeAction(action: AIAction): string | null {
       endTime: String(d.endTime ?? '10:00'),
       isFixed: false,
       reminder: false,
+      weight: 2,
     });
     const days = (Array.isArray(d.daysOfWeek) ? d.daysOfWeek : [1, 2, 3, 4, 5])
       .sort((a: number, b: number) => a - b)

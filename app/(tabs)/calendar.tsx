@@ -65,6 +65,7 @@ export default function CalendarScreen() {
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [viewMonth, setViewMonth] = useState(new Date());
   const [addModalVisible, setAddModalVisible] = useState(false);
+  const [calView, setCalView] = useState<'month' | 'week' | 'day' | 'year'>('month');
 
   // New event form state
   const [newTitle, setNewTitle] = useState('');
@@ -278,101 +279,226 @@ export default function CalendarScreen() {
         <Text style={{ color: c.primary, fontSize: 15, fontWeight: '400' }}>Back</Text>
       </TouchableOpacity>
 
-      {/* Month nav */}
+      {/* View mode tabs */}
+      <View style={{ flexDirection: 'row', paddingHorizontal: 16, paddingBottom: 6, gap: 6 }}>
+        {(['month', 'week', 'day', 'year'] as const).map((v) => (
+          <TouchableOpacity
+            key={v}
+            onPress={() => setCalView(v)}
+            style={{
+              paddingHorizontal: 12, paddingVertical: 5, borderRadius: 8,
+              backgroundColor: calView === v ? c.primary : c.surfaceAlt,
+              borderWidth: 1, borderColor: calView === v ? c.primary : c.border,
+            }}
+          >
+            <Text style={{
+              color: calView === v ? (c.isDark ? c.bg : '#fff') : c.textSecondary,
+              fontSize: 11, fontWeight: '500', textTransform: 'capitalize',
+            }}>{v}</Text>
+          </TouchableOpacity>
+        ))}
+        <TouchableOpacity
+          onPress={() => { setViewMonth(new Date()); setSelectedDate(new Date()); }}
+          style={{
+            marginLeft: 'auto', paddingHorizontal: 12, paddingVertical: 5, borderRadius: 8,
+            backgroundColor: c.primaryFaint, borderWidth: 1, borderColor: c.primary + '60',
+          }}
+        >
+          <Text style={{ color: c.primary, fontSize: 11, fontWeight: '500' }}>Today</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Month/week/year nav */}
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 8 }}>
         <TouchableOpacity
-          onPress={() => setViewMonth((d) => new Date(d.getFullYear(), d.getMonth() - 1, 1))}
+          onPress={() => {
+            if (calView === 'year') setViewMonth((d) => new Date(d.getFullYear() - 1, d.getMonth(), 1));
+            else if (calView === 'week') setSelectedDate((d) => { const nd = new Date(d); nd.setDate(d.getDate() - 7); setViewMonth(nd); return nd; });
+            else if (calView === 'day') setSelectedDate((d) => { const nd = new Date(d); nd.setDate(d.getDate() - 1); setViewMonth(nd); return nd; });
+            else setViewMonth((d) => new Date(d.getFullYear(), d.getMonth() - 1, 1));
+          }}
           style={{ padding: 8 }}
         >
           <Text style={{ color: c.primary, fontSize: 26, fontWeight: '300' }}>‹</Text>
         </TouchableOpacity>
-        <Text style={{ color: c.text, fontSize: 20, fontWeight: '600' }}>{MONTHS[month]} {year}</Text>
+        <Text style={{ color: c.text, fontSize: 18, fontWeight: '600' }}>
+          {calView === 'year'
+            ? String(year)
+            : calView === 'day'
+            ? selectedDate.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric' })
+            : calView === 'week'
+            ? (() => { const d0 = new Date(selectedDate); d0.setDate(selectedDate.getDate() - selectedDate.getDay()); const d6 = new Date(d0); d6.setDate(d0.getDate() + 6); return `${d0.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${d6.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`; })()
+            : `${MONTHS[month]} ${year}`}
+        </Text>
         <TouchableOpacity
-          onPress={() => setViewMonth((d) => new Date(d.getFullYear(), d.getMonth() + 1, 1))}
+          onPress={() => {
+            if (calView === 'year') setViewMonth((d) => new Date(d.getFullYear() + 1, d.getMonth(), 1));
+            else if (calView === 'week') setSelectedDate((d) => { const nd = new Date(d); nd.setDate(d.getDate() + 7); setViewMonth(nd); return nd; });
+            else if (calView === 'day') setSelectedDate((d) => { const nd = new Date(d); nd.setDate(d.getDate() + 1); setViewMonth(nd); return nd; });
+            else setViewMonth((d) => new Date(d.getFullYear(), d.getMonth() + 1, 1));
+          }}
           style={{ padding: 8 }}
         >
           <Text style={{ color: c.primary, fontSize: 26, fontWeight: '300' }}>›</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Day header */}
-      <View style={{ flexDirection: 'row', paddingHorizontal: 12, marginBottom: 4 }}>
-        {DAYS.map((d, i) => (
-          <Text key={i} style={{ flex: 1, textAlign: 'center', color: c.textMuted, fontSize: 11, fontWeight: '600' }}>
-            {d}
-          </Text>
-        ))}
-      </View>
+      {calView === 'month' && (
+        <>
+          {/* Day header */}
+          <View style={{ flexDirection: 'row', paddingHorizontal: 12, marginBottom: 4 }}>
+            {DAYS.map((d, i) => (
+              <Text key={i} style={{ flex: 1, textAlign: 'center', color: c.textMuted, fontSize: 11, fontWeight: '600' }}>
+                {d}
+              </Text>
+            ))}
+          </View>
 
-      {/* Calendar grid */}
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 8, marginBottom: 12 }}>
-        {cells.map((d, i) => {
-          const dayEvents = d ? allEventsForDay(d) : [];
-          const selected = d != null && isSelected(d);
-          const todayDay = d != null && isToday(d);
-          return (
-            <TouchableOpacity
-              key={i}
-              style={{
-                width: `${100 / 7}%`,
-                height: 64,
-                alignItems: 'center',
-                justifyContent: 'flex-start',
-                paddingTop: 6,
-                borderRadius: 10,
-                backgroundColor: selected ? c.primary : 'transparent',
-                borderWidth: todayDay && !selected ? 1 : 0,
-                borderColor: c.primary,
-              }}
-              onPress={() => d && setSelectedDate(new Date(year, month, d))}
-              disabled={!d}
-            >
-              {d && (
-                <>
-                  <Text style={{
-                    color: selected ? (c.isDark ? c.bg : '#fff') : todayDay ? c.primary : c.text,
-                    fontSize: 14,
-                    fontWeight: selected || todayDay ? '600' : '400',
-                    marginBottom: 3,
-                  }}>
-                    {d}
+          {/* Calendar grid */}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 8, marginBottom: 12 }}>
+            {cells.map((d, i) => {
+              const dayEvents = d ? allEventsForDay(d) : [];
+              const selected = d != null && isSelected(d);
+              const todayDay = d != null && isToday(d);
+              return (
+                <TouchableOpacity
+                  key={i}
+                  style={{
+                    width: `${100 / 7}%`, height: 64, alignItems: 'center', justifyContent: 'flex-start',
+                    paddingTop: 6, borderRadius: 10,
+                    backgroundColor: selected ? c.primary : 'transparent',
+                    borderWidth: todayDay && !selected ? 1 : 0, borderColor: c.primary,
+                  }}
+                  onPress={() => d && setSelectedDate(new Date(year, month, d))}
+                  disabled={!d}
+                >
+                  {d && (
+                    <>
+                      <Text style={{
+                        color: selected ? (c.isDark ? c.bg : '#fff') : todayDay ? c.primary : c.text,
+                        fontSize: 14, fontWeight: selected || todayDay ? '600' : '400', marginBottom: 3,
+                      }}>{d}</Text>
+                      <View style={{ gap: 2, width: '90%' }}>
+                        {dayEvents.slice(0, 2).map((e) => (
+                          <View key={e.id} style={{ borderRadius: 3, paddingHorizontal: 3, backgroundColor: (e.calendarColor ?? c.primary) + (selected ? '60' : '30') }}>
+                            <Text style={{ color: selected ? (c.isDark ? c.bg : '#fff') : (e.calendarColor ?? c.primary), fontSize: 8, fontWeight: '500' }} numberOfLines={1}>
+                              {e.title}
+                            </Text>
+                          </View>
+                        ))}
+                        {dayEvents.length > 2 && (
+                          <Text style={{ color: c.textMuted, fontSize: 8, paddingHorizontal: 3 }}>+{dayEvents.length - 2}</Text>
+                        )}
+                      </View>
+                    </>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </>
+      )}
+
+      {calView === 'year' && (
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+            {Array.from({ length: 12 }, (_, mi) => {
+              const mDate = new Date(year, mi, 1);
+              const mDays = new Date(year, mi + 1, 0).getDate();
+              const mFirst = new Date(year, mi, 1).getDay();
+              const mCells: (number | null)[] = [...Array(mFirst).fill(null), ...Array.from({ length: mDays }, (_, i) => i + 1)];
+              const mEvents = events.filter(e => e.startDate.getMonth() === mi && e.startDate.getFullYear() === year);
+              const isCurrentMonth = mi === today.getMonth() && year === today.getFullYear();
+              return (
+                <TouchableOpacity
+                  key={mi}
+                  onPress={() => { setViewMonth(mDate); setCalView('month'); setSelectedDate(mDate); }}
+                  style={{
+                    width: '47%', backgroundColor: c.surface, borderRadius: 12, padding: 10,
+                    borderWidth: 1, borderColor: isCurrentMonth ? c.primary + '60' : c.border,
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={{ color: isCurrentMonth ? c.primary : c.text, fontSize: 12, fontWeight: '600', marginBottom: 6 }}>
+                    {MONTHS[mi]}
                   </Text>
-                  <View style={{ gap: 2, width: '90%' }}>
-                    {dayEvents.slice(0, 2).map((e) => (
-                      <View
-                        key={e.id}
-                        style={{
-                          borderRadius: 3,
-                          paddingHorizontal: 3,
-                          backgroundColor: (e.calendarColor ?? c.primary) + (selected ? '60' : '30'),
-                        }}
-                      >
-                        <Text
-                          style={{
-                            color: selected ? (c.isDark ? c.bg : '#fff') : (e.calendarColor ?? c.primary),
-                            fontSize: 8,
-                            fontWeight: '500',
-                          }}
-                          numberOfLines={1}
-                        >
-                          {e.title}
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                    {mCells.slice(0, 35).map((d, ci) => {
+                      const isT = d === today.getDate() && isCurrentMonth;
+                      const hasEvt = d ? mEvents.some(e => e.startDate.getDate() === d) : false;
+                      return (
+                        <View key={ci} style={{ width: '14.28%', alignItems: 'center', paddingVertical: 1 }}>
+                          {d ? (
+                            <View style={{ width: 14, height: 14, borderRadius: 7, backgroundColor: isT ? c.primary : 'transparent', alignItems: 'center', justifyContent: 'center' }}>
+                              <Text style={{ color: isT ? (c.isDark ? c.bg : '#fff') : c.textMuted, fontSize: 7 }}>{d}</Text>
+                              {hasEvt && !isT && <View style={{ position: 'absolute', bottom: 0, width: 3, height: 3, borderRadius: 1.5, backgroundColor: c.primary }} />}
+                            </View>
+                          ) : <View style={{ width: 14, height: 14 }} />}
+                        </View>
+                      );
+                    })}
+                  </View>
+                  {mEvents.length > 0 && (
+                    <Text style={{ color: c.textMuted, fontSize: 9, marginTop: 4 }}>{mEvents.length} event{mEvents.length !== 1 ? 's' : ''}</Text>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </ScrollView>
+      )}
+
+      {calView === 'week' && (
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+          {Array.from({ length: 7 }, (_, i) => {
+            const d = new Date(selectedDate);
+            d.setDate(selectedDate.getDate() - selectedDate.getDay() + i);
+            const isT = d.toDateString() === today.toDateString();
+            const dayKey = fmtDateKey(d);
+            const dayEvts = [
+              ...events.filter(e => fmtDateKey(e.startDate) === dayKey),
+              ...localEvents.filter(le => le.date === dayKey).map(le => ({
+                id: le.id, title: le.title,
+                startDate: le.isAllDay ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0) : parseTime(d, le.startTime),
+                endDate: le.isAllDay ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59) : parseTime(d, le.endTime),
+                calendarId: '', calendarColor: le.color, isLocal: true, isAllDay: le.isAllDay,
+              })),
+            ];
+            return (
+              <View key={i} style={{ marginBottom: 16 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                  <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: isT ? c.primary : c.surfaceAlt, alignItems: 'center', justifyContent: 'center' }}>
+                    <Text style={{ color: isT ? (c.isDark ? c.bg : '#fff') : c.textSecondary, fontSize: 13, fontWeight: '600' }}>{d.getDate()}</Text>
+                  </View>
+                  <Text style={{ color: isT ? c.primary : c.textSecondary, fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.6 }}>
+                    {d.toLocaleDateString('en-US', { weekday: 'long' })}
+                  </Text>
+                </View>
+                {dayEvts.length === 0 ? (
+                  <Text style={{ color: c.textMuted, fontSize: 12, paddingLeft: 42 }}>No events</Text>
+                ) : (
+                  dayEvts.sort((a, b) => a.startDate.getTime() - b.startDate.getTime()).map(e => (
+                    <TouchableOpacity
+                      key={e.id} onLongPress={() => handleDeleteEvent(e)} activeOpacity={0.75}
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: c.surface, borderRadius: 10, padding: 10, marginBottom: 6, marginLeft: 42, borderWidth: 1, borderColor: c.border }}
+                    >
+                      <View style={{ width: 3, height: 28, borderRadius: 2, backgroundColor: e.calendarColor ?? c.primary }} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: c.text, fontSize: 13, fontWeight: '500' }}>{e.title}</Text>
+                        <Text style={{ color: c.textSecondary, fontSize: 11 }}>
+                          {e.isAllDay ? 'All day' : `${e.startDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} – ${e.endDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`}
                         </Text>
                       </View>
-                    ))}
-                    {dayEvents.length > 2 && (
-                      <Text style={{ color: c.textMuted, fontSize: 8, paddingHorizontal: 3 }}>
-                        +{dayEvents.length - 2}
-                      </Text>
-                    )}
-                  </View>
-                </>
-              )}
-            </TouchableOpacity>
-          );
-        })}
-      </View>
+                    </TouchableOpacity>
+                  ))
+                )}
+              </View>
+            );
+          })}
+        </ScrollView>
+      )}
 
-      {/* Selected day events */}
+      {(calView === 'month' || calView === 'day') && (
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
           <Text style={{ color: c.textSecondary, fontSize: 12, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.8 }}>
@@ -380,21 +506,14 @@ export default function CalendarScreen() {
           </Text>
           <TouchableOpacity
             onPress={() => setAddModalVisible(true)}
-            style={{
-              backgroundColor: c.primaryFaint, borderRadius: 16,
-              paddingHorizontal: 12, paddingVertical: 6,
-              borderWidth: 1, borderColor: c.primary + '60',
-            }}
+            style={{ backgroundColor: c.primaryFaint, borderRadius: 16, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: c.primary + '60' }}
           >
             <Text style={{ color: c.primary, fontSize: 12, fontWeight: '500' }}>+ Event</Text>
           </TouchableOpacity>
         </View>
 
         {!hasPermission && (
-          <TouchableOpacity
-            onPress={requestAccess}
-            style={{ backgroundColor: c.primaryFaint, borderRadius: 12, padding: 16, alignItems: 'center', borderWidth: 1, borderColor: c.primary + '60', marginBottom: 16 }}
-          >
+          <TouchableOpacity onPress={requestAccess} style={{ backgroundColor: c.primaryFaint, borderRadius: 12, padding: 16, alignItems: 'center', borderWidth: 1, borderColor: c.primary + '60', marginBottom: 16 }}>
             <Text style={{ color: c.primary, fontSize: 15, fontWeight: '500' }}>Sync Apple Calendar</Text>
           </TouchableOpacity>
         )}
@@ -413,33 +532,16 @@ export default function CalendarScreen() {
           })
           .map((e) => (
             <TouchableOpacity
-              key={e.id}
-              onLongPress={() => handleDeleteEvent(e)}
-              activeOpacity={0.75}
-              style={{
-                backgroundColor: c.surface,
-                borderRadius: 12,
-                padding: 14,
-                marginBottom: 10,
-                borderLeftWidth: 3,
-                borderLeftColor: e.calendarColor ?? c.primary,
-                borderWidth: 1,
-                borderColor: c.border,
-              }}
+              key={e.id} onLongPress={() => handleDeleteEvent(e)} activeOpacity={0.75}
+              style={{ backgroundColor: c.surface, borderRadius: 12, padding: 14, marginBottom: 10, borderLeftWidth: 3, borderLeftColor: e.calendarColor ?? c.primary, borderWidth: 1, borderColor: c.border }}
             >
               <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }}>
                 <View style={{ flex: 1 }}>
                   <Text style={{ color: c.text, fontSize: 15, fontWeight: '500', marginBottom: 4 }}>{e.title}</Text>
                   <Text style={{ color: c.textSecondary, fontSize: 12, fontWeight: '400' }}>
-                    {e.isAllDay
-                      ? 'All day'
-                      : `${e.startDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} – ${e.endDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`}
+                    {e.isAllDay ? 'All day' : `${e.startDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} – ${e.endDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`}
                   </Text>
-                  {e.notes ? (
-                    <Text style={{ color: c.textMuted, fontSize: 12, marginTop: 6, fontWeight: '400' }} numberOfLines={2}>
-                      {e.notes}
-                    </Text>
-                  ) : null}
+                  {e.notes ? <Text style={{ color: c.textMuted, fontSize: 12, marginTop: 6, fontWeight: '400' }} numberOfLines={2}>{e.notes}</Text> : null}
                   {e.isLocal && (
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 6 }}>
                       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: e.calendarColor ?? c.primary }} />
@@ -454,6 +556,7 @@ export default function CalendarScreen() {
             </TouchableOpacity>
           ))}
       </ScrollView>
+      )}
 
       {/* Add event modal */}
       <Modal visible={addModalVisible} animationType="slide" presentationStyle="pageSheet">

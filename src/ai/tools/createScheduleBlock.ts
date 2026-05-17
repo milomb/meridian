@@ -65,6 +65,7 @@ export const createScheduleBlockTool = {
       endTime: args.end_time,
       isFixed: false,
       reminder: false,
+      weight: 2,
     });
     const days = [...args.days_of_week].sort((a, b) => a - b).map((d) => DAY_SHORT[d]).join(', ');
     return { success: true, message: `"${args.title}" added · ${days} · ${args.start_time}–${args.end_time}` };
