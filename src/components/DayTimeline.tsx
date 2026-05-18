@@ -1,12 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Modal, TextInput,
-  KeyboardAvoidingView, Platform,
+  KeyboardAvoidingView, Platform, Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getCategoryColor } from '../theme/colors';
 import { TimeBlock, DayOfWeek } from '../store/scheduleStore';
 import { useResolutionStore, ResolutionStatus } from '../store/resolutionStore';
+import { useBlockOverrideStore, BlockOverride } from '../store/blockOverrideStore';
+import { detectCollisions, computeLayout, Collision } from '../utils/collisions';
+import { CollisionSheet } from './CollisionSheet';
+import { BlockMoveSheet } from './BlockMoveSheet';
+
+const { width: SW } = Dimensions.get('window');
+const CONFLICT_COLOR = '#E05C5C';
 
 export interface CalEvent {
   id: string;
@@ -21,6 +28,9 @@ export interface CalEvent {
 export const TL_HOUR_H = 56;
 export const TL_LABEL_W = 52;
 export const TL_END = 24;
+// Available width for timeline items (label + 4px gap + 8px right padding)
+const ITEM_AREA_W = SW - TL_LABEL_W - 4 - 8;
+const COL_GAP = 3;
 
 export function DayTimeline({
   day, scheduleBlocks, calEvents, c, customCategories, onDayChange,
@@ -37,11 +47,16 @@ export function DayTimeline({
   onPendingClear?: () => void;
 }) {
   const scrollRef = useRef<ScrollView>(null);
-  const { getResolution, resolveBlock } = useResolutionStore();
+  const { getResolution, resolveBlock, unresolveBlock } = useResolutionStore();
+  const { getOverride, setOverride } = useBlockOverrideStore();
+
   const [resSheet, setResSheet] = useState<TimeBlock | null>(null);
   const [resStatus, setResStatus] = useState<ResolutionStatus | null>(null);
   const [resRating, setResRating] = useState<number | null>(null);
   const [resNote, setResNote] = useState('');
+
+  const [collisionSheet, setCollisionSheet] = useState<{ collision: Collision; primaryBlockId: string | null } | null>(null);
+  const [moveBlock, setMoveBlock] = useState<TimeBlock | null>(null);
 
   const now = new Date();
   const nowMidnight = new Date(now); nowMidnight.setHours(0, 0, 0, 0);
@@ -56,9 +71,23 @@ export function DayTimeline({
   const dateKey = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
   const nowHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-  // Dynamic timeline start: go earlier than 6am if something is scheduled there
+  // Apply today's block overrides to get effective times
+  const effectiveBlocks = dayBlocks.map((b) => {
+    const ov = getOverride(b.id, dateKey);
+    return { ...b, startTime: ov?.overrideStart ?? b.startTime, endTime: ov?.overrideEnd ?? b.endTime, hasOverride: !!ov };
+  });
+
+  // Collision detection excludes skipped blocks (skipping is how you resolve a conflict)
+  const nonSkippedBlocks = effectiveBlocks.filter(
+    (b) => getResolution(b.id, dateKey)?.status !== 'skipped',
+  );
+  const activeCollisions = detectCollisions(nonSkippedBlocks, timedEvts);
+
+  // Column layout for side-by-side rendering
+  const layoutMap = computeLayout(effectiveBlocks, timedEvts);
+
   const allStartHours = [
-    ...dayBlocks.map((b) => parseInt(b.startTime.split(':')[0], 10)),
+    ...effectiveBlocks.map((b) => parseInt(b.startTime.split(':')[0], 10)),
     ...timedEvts.map((e) => e.startDate.getHours()),
   ];
   const tlStart = allStartHours.length > 0 ? Math.min(6, Math.min(...allStartHours)) : 6;
@@ -69,21 +98,25 @@ export function DayTimeline({
     return ((h + m / 60) - tlStart) * TL_HOUR_H;
   }
 
-  // Auto-scroll to current time when viewing today
+  function colLeft(col: number, numCols: number): number {
+    const colW = (ITEM_AREA_W - COL_GAP * (numCols - 1)) / numCols;
+    return TL_LABEL_W + 4 + col * (colW + COL_GAP);
+  }
+
+  function colWidth(numCols: number): number {
+    return (ITEM_AREA_W - COL_GAP * (numCols - 1)) / numCols;
+  }
+
   useEffect(() => {
     if (!isToday) return;
     const offset = Math.max(0, ((now.getHours() + now.getMinutes() / 60) - tlStart - 1.5) * TL_HOUR_H);
     setTimeout(() => scrollRef.current?.scrollTo({ y: offset, animated: false }), 80);
   }, [day, tlStart]);
 
-  // Auto-open resolution sheet for pending block (from banner deep-link)
   useEffect(() => {
     if (!pendingOpenBlockId || !pendingOpenDate || dateKey !== pendingOpenDate) return;
     const block = dayBlocks.find((b) => b.id === pendingOpenBlockId);
-    if (block) {
-      openResSheet(block);
-      onPendingClear?.();
-    }
+    if (block) { openResSheet(block); onPendingClear?.(); }
   }, [pendingOpenBlockId, pendingOpenDate, dateKey, dayBlocks]);
 
   const prevDay = () => { const d = new Date(day); d.setDate(d.getDate() - 1); onDayChange(d); };
@@ -110,8 +143,45 @@ export function DayTimeline({
     setResSheet(null); setResStatus(null); setResRating(null); setResNote('');
   };
 
+  const openCollisionSheet = (blockId: string) => {
+    const collision = activeCollisions.find((col) => col.idA === blockId || col.idB === blockId);
+    if (collision) setCollisionSheet({ collision, primaryBlockId: blockId });
+  };
+
+  const handleMoveBlock = (blockId: string) => {
+    const block = dayBlocks.find((b) => b.id === blockId);
+    if (!block) return;
+    setCollisionSheet(null);
+    setMoveBlock(block);
+  };
+
+  const handleSkipConflict = () => {
+    if (!collisionSheet) return;
+    const col = collisionSheet.collision;
+    const skipId = col.type === 'block-block'
+      ? (collisionSheet.primaryBlockId ?? col.idA)
+      : col.idA; // for block-event, idA is always the schedule block
+    resolveBlock(skipId, dateKey, 'skipped');
+    setCollisionSheet(null);
+  };
+
+  const getSkipTitle = () => {
+    if (!collisionSheet) return '';
+    const col = collisionSheet.collision;
+    if (col.type !== 'block-block') return col.titleA;
+    return collisionSheet.primaryBlockId === col.idA ? col.titleA : col.titleB;
+  };
+
+  const handleConfirmMove = (override: BlockOverride) => {
+    setOverride(override);
+    setMoveBlock(null);
+  };
+
   const fmtDayLabel = (d: Date) =>
     d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+
+  const blockIsColliding = (id: string) =>
+    activeCollisions.some((col) => col.idA === id || col.idB === id);
 
   return (
     <View style={{ flex: 1 }}>
@@ -130,6 +200,16 @@ export function DayTimeline({
           <Ionicons name="chevron-forward" size={20} color={c.primary} />
         </TouchableOpacity>
       </View>
+
+      {/* Conflict banner */}
+      {activeCollisions.length > 0 && (
+        <View style={{ marginHorizontal: TL_LABEL_W + 8, marginBottom: 6, backgroundColor: CONFLICT_COLOR + '14', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Ionicons name="warning-outline" size={12} color={CONFLICT_COLOR} />
+          <Text style={{ color: CONFLICT_COLOR, fontSize: 11, fontWeight: '600' }}>
+            {activeCollisions.length} scheduling {activeCollisions.length === 1 ? 'conflict' : 'conflicts'} — tap a highlighted item
+          </Text>
+        </View>
+      )}
 
       {allDayEvts.length > 0 && (
         <View style={{ paddingHorizontal: TL_LABEL_W + 8, paddingBottom: 8, gap: 4 }}>
@@ -150,7 +230,6 @@ export function DayTimeline({
               <View style={{ flex: 1, height: 1, backgroundColor: c.border + '55', marginTop: 4 }} />
             </View>
           ))}
-          {/* Half-hour ticks */}
           {HOURS.map((h) => (
             <View key={`hh${h}`} style={{ position: 'absolute', top: (h - tlStart) * TL_HOUR_H + TL_HOUR_H / 2, left: TL_LABEL_W, right: 0, height: 1, backgroundColor: c.border + '22' }} />
           ))}
@@ -166,55 +245,99 @@ export function DayTimeline({
             const top = tlTop(e.startDate.getHours(), e.startDate.getMinutes());
             const h = Math.max(28, (e.endDate.getTime() - e.startDate.getTime()) / 3600000 * TL_HOUR_H);
             const color = e.color ?? c.primary;
+            const layout = layoutMap.get(e.id) ?? { col: 0, numCols: 1 };
+            const isColliding = blockIsColliding(e.id);
             return (
-              <View key={e.id} style={{ position: 'absolute', top, left: TL_LABEL_W + 4, right: 0, height: h, borderRadius: 6, borderWidth: 1.5, borderColor: color + 'BB', backgroundColor: color + '14', padding: 4, overflow: 'hidden' }}>
-                <Text style={{ color, fontSize: 10, fontWeight: '600' }} numberOfLines={1}>{e.title}</Text>
-                <Text style={{ color: color + 'AA', fontSize: 9 }} numberOfLines={1}>
+              <TouchableOpacity
+                key={e.id}
+                onPress={() => isColliding ? openCollisionSheet(e.id) : undefined}
+                activeOpacity={isColliding ? 0.7 : 1}
+                style={{
+                  position: 'absolute', top,
+                  left: colLeft(layout.col, layout.numCols),
+                  width: colWidth(layout.numCols),
+                  height: h, borderRadius: 6,
+                  borderWidth: isColliding ? 1.5 : 1.5,
+                  borderColor: isColliding ? CONFLICT_COLOR + 'AA' : color + 'BB',
+                  backgroundColor: isColliding ? CONFLICT_COLOR + '12' : color + '14',
+                  padding: 4, overflow: 'hidden',
+                }}
+              >
+                <Text style={{ color: isColliding ? CONFLICT_COLOR : color, fontSize: 10, fontWeight: '600' }} numberOfLines={1}>{e.title}</Text>
+                <Text style={{ color: (isColliding ? CONFLICT_COLOR : color) + 'AA', fontSize: 9 }} numberOfLines={1}>
                   {e.startDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} – {e.endDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
                   {e.isLocal ? '  ·  local' : ''}
                 </Text>
-              </View>
+                {isColliding && <Ionicons name="warning" size={8} color={CONFLICT_COLOR} style={{ position: 'absolute', top: 3, right: 4 }} />}
+              </TouchableOpacity>
             );
           })}
 
           {/* Schedule blocks */}
-          {dayBlocks.map((b) => {
+          {effectiveBlocks.map((b) => {
             const [sh, sm] = b.startTime.split(':').map(Number);
             const [eh, em] = b.endTime.split(':').map(Number);
             const top = tlTop(sh, sm);
             const h = Math.max(28, ((eh + em / 60) - (sh + sm / 60)) * TL_HOUR_H);
             const catColor = getCategoryColor(b.category, customCategories, c);
+            const layout = layoutMap.get(b.id) ?? { col: 0, numCols: 1 };
 
-            // A block is resolvable only if it has ended: past day, or today with endTime passed
             const canResolve = !isFutureDay && (isToday ? b.endTime <= nowHHMM : true);
             const resolution = getResolution(b.id, dateKey);
             const isUnresolved = canResolve && !resolution;
             const isDone = resolution?.status === 'done';
             const isSkipped = resolution?.status === 'skipped';
-            const borderColor = isUnresolved ? '#D4A574' : isDone ? '#3EB87A' : isSkipped ? '#888' : catColor;
+            const isColliding = blockIsColliding(b.id);
+
+            const borderColor = isColliding ? CONFLICT_COLOR
+              : isUnresolved ? '#D4A574'
+              : isDone ? '#3EB87A'
+              : isSkipped ? '#888'
+              : catColor;
+            const bgColor = isColliding ? CONFLICT_COLOR + '12'
+              : isUnresolved ? '#D4A57412'
+              : isDone ? '#3EB87A12'
+              : isSkipped ? c.border + '18'
+              : catColor + '28';
 
             return (
               <TouchableOpacity
                 key={b.id}
-                onPress={() => canResolve && openResSheet(b)}
-                activeOpacity={canResolve ? 0.7 : 1}
+                onPress={() => {
+                  if (isColliding) { openCollisionSheet(b.id); return; }
+                  if (canResolve) openResSheet(b);
+                }}
+                onLongPress={() => setMoveBlock(scheduleBlocks.find((sb) => sb.id === b.id) ?? null)}
+                activeOpacity={isColliding || canResolve ? 0.7 : 1}
                 style={{
-                  position: 'absolute', top, left: TL_LABEL_W + 4, right: 0, height: h, borderRadius: 6,
-                  backgroundColor: isUnresolved ? '#D4A57412' : isDone ? '#3EB87A12' : isSkipped ? c.border + '18' : catColor + '28',
-                  borderLeftWidth: 3, borderLeftColor: borderColor, padding: 4, overflow: 'hidden',
+                  position: 'absolute', top,
+                  left: colLeft(layout.col, layout.numCols),
+                  width: colWidth(layout.numCols),
+                  height: h, borderRadius: 6,
+                  backgroundColor: bgColor,
+                  borderLeftWidth: 3, borderLeftColor: borderColor,
+                  padding: 4, overflow: 'hidden',
                   opacity: isSkipped ? 0.55 : 1,
                 }}
               >
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }}>
-                  <Text style={{ color: isUnresolved ? '#D4A574' : isDone ? '#3EB87A' : catColor, fontSize: 10, fontWeight: '700', flex: 1 }} numberOfLines={1}>{b.title}</Text>
-                  {isUnresolved && h > 30 && <Ionicons name="ellipse" size={6} color="#D4A574" style={{ marginTop: 2 }} />}
-                  {isDone && h > 30 && <Ionicons name="checkmark-circle" size={10} color="#3EB87A" />}
-                  {isSkipped && h > 30 && <Ionicons name="close-circle" size={10} color="#888" />}
+                  <Text style={{ color: isColliding ? CONFLICT_COLOR : isUnresolved ? '#D4A574' : isDone ? '#3EB87A' : catColor, fontSize: 10, fontWeight: '700', flex: 1 }} numberOfLines={1}>{b.title}</Text>
+                  {isColliding && h > 30 && <Ionicons name="warning" size={10} color={CONFLICT_COLOR} style={{ marginTop: 1 }} />}
+                  {!isColliding && isUnresolved && h > 30 && <Ionicons name="ellipse" size={6} color="#D4A574" style={{ marginTop: 2 }} />}
+                  {!isColliding && isDone && h > 30 && <Ionicons name="checkmark-circle" size={10} color="#3EB87A" />}
+                  {!isColliding && isSkipped && h > 30 && <Ionicons name="close-circle" size={10} color="#888" />}
                 </View>
                 {h > 34 && (
-                  <Text style={{ color: (isUnresolved ? '#D4A574' : isDone ? '#3EB87A' : catColor) + 'BB', fontSize: 9 }} numberOfLines={1}>
-                    {b.startTime} – {b.endTime}{canResolve && !resolution ? '  · tap to resolve' : ''}
+                  <Text style={{ color: (isColliding ? CONFLICT_COLOR : isUnresolved ? '#D4A574' : isDone ? '#3EB87A' : catColor) + 'BB', fontSize: 9 }} numberOfLines={1}>
+                    {b.startTime} – {b.endTime}
+                    {!isColliding && canResolve && !resolution ? '  · tap to resolve' : ''}
                   </Text>
+                )}
+                {b.hasOverride && h > 44 && (
+                  <Text style={{ color: '#D4A574AA', fontSize: 8, marginTop: 1 }}>moved today</Text>
+                )}
+                {!isColliding && !resolution && !canResolve && h > 50 && (
+                  <Text style={{ color: catColor + '70', fontSize: 8, marginTop: 1 }}>hold to reschedule</Text>
                 )}
               </TouchableOpacity>
             );
@@ -233,25 +356,29 @@ export function DayTimeline({
                 <Text style={{ color: c.text, fontSize: 18, fontWeight: '600' }}>{resSheet?.title}</Text>
                 <Text style={{ color: c.textSecondary, fontSize: 13, marginTop: 2 }}>{resSheet?.startTime} – {resSheet?.endTime}</Text>
               </View>
-              <View style={{ flexDirection: 'row', marginHorizontal: 20, gap: 12, marginBottom: 20 }}>
+              <View style={{ flexDirection: 'row', marginHorizontal: 20, gap: 10, marginBottom: 20 }}>
                 {(['done', 'skipped'] as const).map((s) => (
-                  <TouchableOpacity
-                    key={s}
-                    onPress={() => setResStatus(s)}
-                    style={{ flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center', backgroundColor: resStatus === s ? (s === 'done' ? '#3EB87A22' : '#88888822') : c.surfaceAlt, borderWidth: 2, borderColor: resStatus === s ? (s === 'done' ? '#3EB87A' : '#888') : c.border }}
-                    activeOpacity={0.7}
-                  >
+                  <TouchableOpacity key={s} onPress={() => setResStatus(s)} style={{ flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center', backgroundColor: resStatus === s ? (s === 'done' ? '#3EB87A22' : '#88888822') : c.surfaceAlt, borderWidth: 2, borderColor: resStatus === s ? (s === 'done' ? '#3EB87A' : '#888') : c.border }} activeOpacity={0.7}>
                     <Ionicons name={s === 'done' ? 'checkmark-circle' : 'close-circle'} size={22} color={resStatus === s ? (s === 'done' ? '#3EB87A' : '#888') : c.textMuted} />
-                    <Text style={{ color: resStatus === s ? (s === 'done' ? '#3EB87A' : c.textSecondary) : c.textMuted, fontSize: 13, fontWeight: '600', marginTop: 4 }}>
-                      {s === 'done' ? 'Done' : 'Skipped'}
-                    </Text>
+                    <Text style={{ color: resStatus === s ? (s === 'done' ? '#3EB87A' : c.textSecondary) : c.textMuted, fontSize: 13, fontWeight: '600', marginTop: 4 }}>{s === 'done' ? 'Done' : 'Skipped'}</Text>
                   </TouchableOpacity>
                 ))}
+                {resSheet && getResolution(resSheet.id, dateKey) && (
+                  <TouchableOpacity
+                    onPress={() => {
+                      unresolveBlock(resSheet.id, dateKey);
+                      setResSheet(null); setResStatus(null); setResRating(null); setResNote('');
+                    }}
+                    style={{ flex: 1, paddingVertical: 14, borderRadius: 12, alignItems: 'center', backgroundColor: c.surfaceAlt, borderWidth: 2, borderColor: c.border }}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="refresh-circle-outline" size={22} color={c.textMuted} />
+                    <Text style={{ color: c.textMuted, fontSize: 13, fontWeight: '600', marginTop: 4 }}>Undo</Text>
+                  </TouchableOpacity>
+                )}
               </View>
               <View style={{ paddingHorizontal: 20, marginBottom: 16 }}>
-                <Text style={{ color: c.textSecondary, fontSize: 11, fontWeight: '600', letterSpacing: 0.8, textTransform: 'uppercase', marginBottom: 10 }}>
-                  How did it go? (optional)
-                </Text>
+                <Text style={{ color: c.textSecondary, fontSize: 11, fontWeight: '600', letterSpacing: 0.8, textTransform: 'uppercase', marginBottom: 10 }}>How did it go? (optional)</Text>
                 <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
                   {[1, 2, 3, 4, 5].map((star) => (
                     <TouchableOpacity key={star} onPress={() => setResRating(resRating === star ? null : star)} style={{ padding: 4 }}>
@@ -268,6 +395,27 @@ export function DayTimeline({
           </KeyboardAvoidingView>
         </View>
       </Modal>
+
+      {/* Collision sheet */}
+      <CollisionSheet
+        collision={collisionSheet?.collision ?? null}
+        primaryBlockId={collisionSheet?.primaryBlockId ?? null}
+        c={c}
+        onMoveBlock={handleMoveBlock}
+        onSkipPrimary={handleSkipConflict}
+        skipPrimaryTitle={getSkipTitle()}
+        onClose={() => setCollisionSheet(null)}
+      />
+
+      {/* Block move sheet */}
+      <BlockMoveSheet
+        block={moveBlock}
+        date={dateKey}
+        existingOverride={moveBlock ? getOverride(moveBlock.id, dateKey) : undefined}
+        c={c}
+        onConfirm={handleConfirmMove}
+        onCancel={() => setMoveBlock(null)}
+      />
     </View>
   );
 }

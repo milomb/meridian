@@ -10,6 +10,7 @@ import { useSettingsStore } from '../../src/store/settingsStore';
 import { useScheduleStore, TimeBlock, DayOfWeek } from '../../src/store/scheduleStore';
 import { useLocalEventStore } from '../../src/store/localEventStore';
 import { useResolutionStore } from '../../src/store/resolutionStore';
+import { useBlockOverrideStore } from '../../src/store/blockOverrideStore';
 import { DayTimeline, CalEvent } from '../../src/components/DayTimeline';
 
 const BUILT_IN_CATEGORIES = ['work', 'training', 'personal', 'rest', 'nutrition', 'learning'];
@@ -41,7 +42,10 @@ export default function ScheduleScreen() {
   const { blocks, load, addBlock, updateBlock, deleteBlock } = useScheduleStore();
   const { customCategories } = useSettingsStore();
   const { events: localEvents, load: loadLocalEvents } = useLocalEventStore();
-  const { load: loadResolutions, pendingBlockId, pendingDate, clearPending } = useResolutionStore();
+  const { load: loadResolutions, pendingBlockId, pendingDate, clearPending, getResolution } = useResolutionStore();
+  const { load: loadOverrides, getOverride } = useBlockOverrideStore();
+  const todayKey = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
+  const todayDow = new Date().getDay() as DayOfWeek;
   const [modalVisible, setModalVisible] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<BlockFormState>(emptyForm);
@@ -52,7 +56,7 @@ export default function ScheduleScreen() {
 
   const allCategories = [...BUILT_IN_CATEGORIES, ...customCategories.map((cc) => cc.name)];
 
-  useEffect(() => { load(); loadLocalEvents(); loadResolutions(); }, []);
+  useEffect(() => { load(); loadLocalEvents(); loadResolutions(); loadOverrides(); }, []);
 
   // Deep-link from unresolved banner: navigate to the target day and auto-open the sheet
   useEffect(() => {
@@ -187,15 +191,26 @@ export default function ScheduleScreen() {
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20, paddingTop: 0, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
           {sorted.map((b) => {
             const catColor = getCategoryColor(b.category, customCategories, c);
+            const isToday = b.daysOfWeek.includes(todayDow);
+            const todayRes = isToday ? getResolution(b.id, todayKey) : null;
+            const todayOv = isToday ? getOverride(b.id, todayKey) : null;
+            const isDone = todayRes?.status === 'done';
+            const isSkipped = todayRes?.status === 'skipped';
+            const isMoved = !!todayOv;
             return (
-              <TouchableOpacity key={b.id} onPress={() => openEdit(b)} style={{ backgroundColor: c.surface, borderRadius: 12, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: c.border, borderLeftWidth: 3, borderLeftColor: catColor }}>
+              <TouchableOpacity key={b.id} onPress={() => openEdit(b)} style={{ backgroundColor: c.surface, borderRadius: 12, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: isDone ? '#3EB87A30' : c.border, borderLeftWidth: 3, borderLeftColor: isDone ? '#3EB87A' : isSkipped ? '#888' : catColor, opacity: isSkipped ? 0.6 : 1 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginBottom: 8 }}>
                   <View style={{ flex: 1 }}>
-                    <Text style={{ color: c.text, fontSize: 15, fontWeight: '500' }}>{b.title}</Text>
-                    <Text style={{ color: c.textSecondary, fontSize: 12, marginTop: 2 }}>{b.startTime} – {b.endTime}</Text>
+                    <Text style={{ color: isDone ? '#3EB87A' : c.text, fontSize: 15, fontWeight: '500', textDecorationLine: isSkipped ? 'line-through' : 'none' }}>{b.title}</Text>
+                    <Text style={{ color: c.textSecondary, fontSize: 12, marginTop: 2, fontStyle: isMoved ? 'italic' : 'normal' }}>
+                      {isMoved ? `${todayOv!.overrideStart} – ${todayOv!.overrideEnd} · moved` : `${b.startTime} – ${b.endTime}`}
+                    </Text>
                     {b.description ? <Text style={{ color: c.textMuted, fontSize: 12, marginTop: 4 }} numberOfLines={2}>{b.description}</Text> : null}
                   </View>
                   <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                    {isToday && isDone && <Ionicons name="checkmark-circle" size={16} color="#3EB87A" />}
+                    {isToday && isSkipped && <Ionicons name="close-circle" size={16} color="#888" />}
+                    {isToday && isMoved && !isDone && !isSkipped && <Ionicons name="time-outline" size={14} color="#D4A574" />}
                     <Text style={{ fontSize: 11, fontWeight: '500', color: catColor, textTransform: 'capitalize' }}>{b.category}</Text>
                     <Text style={{ color: c.textMuted, fontSize: 10 }}>w{b.weight ?? 2}</Text>
                   </View>
@@ -208,8 +223,11 @@ export default function ScheduleScreen() {
                       </View>
                     ))}
                   </View>
-                  <View style={{ flexDirection: 'row', gap: 4 }}>
-                    {b.isFixed && <View style={{ backgroundColor: c.surfaceAlt, borderRadius: 5, paddingHorizontal: 6, paddingVertical: 2 }}><Text style={{ color: c.textSecondary, fontSize: 10 }}>Fixed</Text></View>}
+                  <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+                    {b.isFixed
+                      ? <View style={{ backgroundColor: c.primaryFaint, borderRadius: 5, paddingHorizontal: 6, paddingVertical: 2, borderWidth: 1, borderColor: c.primary + '50' }}><Text style={{ color: c.primary, fontSize: 10, fontWeight: '500' }}>Recurring</Text></View>
+                      : <View style={{ backgroundColor: '#D4A57418', borderRadius: 5, paddingHorizontal: 6, paddingVertical: 2, borderWidth: 1, borderColor: '#D4A57450' }}><Text style={{ color: '#D4A574', fontSize: 10, fontWeight: '500' }}>Temporary</Text></View>
+                    }
                     {b.reminder && <Text style={{ fontSize: 12 }}>🔔</Text>}
                   </View>
                 </View>
@@ -265,7 +283,27 @@ export default function ScheduleScreen() {
               })}
             </View>
 
-            <FieldLabel text="Days" c={c} />
+            <FieldLabel text="Schedule Type" c={c} />
+            <View style={{ flexDirection: 'row', backgroundColor: c.surfaceAlt, borderRadius: 12, padding: 3, borderWidth: 1, borderColor: c.border, marginBottom: 4 }}>
+              {([
+                { value: true, label: 'Recurring', icon: '↻', hint: 'Repeats every week' },
+                { value: false, label: 'Temporary', icon: '◈', hint: 'One-off or short-term' },
+              ] as const).map((opt) => {
+                const active = form.isFixed === opt.value;
+                return (
+                  <TouchableOpacity
+                    key={String(opt.value)}
+                    onPress={() => setForm((f) => ({ ...f, isFixed: opt.value }))}
+                    style={{ flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 10, backgroundColor: active ? c.primary : 'transparent', gap: 1 }}
+                  >
+                    <Text style={{ color: active ? (c.isDark ? c.bg : '#fff') : c.textSecondary, fontSize: 14, fontWeight: '600' }}>{opt.label}</Text>
+                    <Text style={{ color: active ? (c.isDark ? c.bg + 'cc' : '#ffffffcc') : c.textMuted, fontSize: 10 }}>{opt.hint}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <FieldLabel text={form.isFixed ? 'Days (every week)' : 'Days (this occurrence)'} c={c} />
             <View style={{ flexDirection: 'row', gap: 6 }}>
               {DAY_LABELS.map((d, i) => {
                 const active = form.daysOfWeek.includes(i as DayOfWeek);
@@ -276,6 +314,11 @@ export default function ScheduleScreen() {
                 );
               })}
             </View>
+            {!form.isFixed && (
+              <Text style={{ color: c.textMuted, fontSize: 11, marginTop: 6, lineHeight: 16 }}>
+                Temporary blocks appear on selected days each week until you delete them.
+              </Text>
+            )}
 
             <FieldLabel text="Score Weight" c={c} />
             <View style={{ flexDirection: 'row', gap: 8 }}>
@@ -288,7 +331,6 @@ export default function ScheduleScreen() {
             </View>
 
             <View style={{ marginTop: 20, gap: 10 }}>
-              <SwitchRow label="Fixed block" value={form.isFixed} onChange={(v) => setForm((f) => ({ ...f, isFixed: v }))} c={c} />
               <SwitchRow label="Reminder" value={form.reminder} onChange={(v) => setForm((f) => ({ ...f, reminder: v }))} c={c} />
             </View>
 

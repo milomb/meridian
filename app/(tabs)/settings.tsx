@@ -16,6 +16,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useColors } from '../../src/theme/colors';
 import { useSettingsStore } from '../../src/store/settingsStore';
 import { THEMES, THEME_NAMES, ThemeKey } from '../../src/theme/themes';
+import { useJarvisStore, buildJarvisStateJson, __seedDevState } from '../../src/store/jarvisStore';
+import { sendToJarvis } from '../../src/services/groqApi';
 
 const PRESET_COLORS = [
   { color: '#E05C5C', bg: '#3A1A1A', label: 'Red' },
@@ -57,6 +59,8 @@ export default function SettingsScreen() {
   const [catBg, setCatBg] = useState(PRESET_COLORS[5].bg);
 
   const [testing, setTesting] = useState(false);
+  const [triggeringBriefing, setTriggeringBriefing] = useState(false);
+  const { clearBriefingFlag, markBriefingRanToday, setBriefingText, setBriefingLoading, setBriefingBannerVisible } = useJarvisStore();
 
   const saveProfile = () => {
     setUserName(nameInput.trim());
@@ -99,6 +103,32 @@ export default function SettingsScreen() {
     addCustomCategory({ name: catName.trim(), color: catColor, bg: catBg });
     setCatName('');
     setCatModalVisible(false);
+  };
+
+  const triggerBriefing = async () => {
+    if (!groqApiKey) {
+      Alert.alert('Groq API key required', 'Add a Groq key above first.');
+      return;
+    }
+    setTriggeringBriefing(true);
+    try {
+      await clearBriefingFlag();
+      setBriefingText(null);
+      setBriefingBannerVisible(false);
+      setBriefingLoading(true);
+      const stateJson = buildJarvisStateJson();
+      const response = await sendToJarvis(groqApiKey, [{ role: 'user', content: '[TRIGGER_MORNING_BRIEFING]' }], stateJson);
+      await markBriefingRanToday();
+      setBriefingText(response.jarvis_speech);
+      setBriefingBannerVisible(true);
+      setBriefingLoading(false);
+      Alert.alert('Briefing triggered', 'Go to the Home tab — the briefing banner will appear.');
+    } catch (err: any) {
+      setBriefingLoading(false);
+      Alert.alert('Briefing failed', err.message ?? 'Unknown error');
+    } finally {
+      setTriggeringBriefing(false);
+    }
   };
 
   const confirmDeleteCat = (id: string, name: string) => {
@@ -483,6 +513,39 @@ export default function SettingsScreen() {
                 </TouchableOpacity>
               );
             })}
+          </View>
+        </View>
+
+        {/* Developer Options */}
+        <View style={s.section}>
+          <Text style={s.sectionLabel}>Developer Options</Text>
+
+          <TouchableOpacity
+            onPress={triggerBriefing}
+            disabled={triggeringBriefing}
+            style={{ backgroundColor: '#3EB87A18', borderRadius: 12, padding: 14, borderWidth: 1, borderColor: '#3EB87A50', alignItems: 'center', marginBottom: 10 }}
+          >
+            <Text style={{ color: triggeringBriefing ? c.textMuted : '#3EB87A', fontSize: 14, fontWeight: '600' }}>
+              {triggeringBriefing ? 'Triggering…' : 'Trigger Morning Briefing'}
+            </Text>
+            <Text style={{ color: c.textMuted, fontSize: 11, marginTop: 3 }}>Re-runs today's briefing and shows the banner</Text>
+          </TouchableOpacity>
+
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <TouchableOpacity
+              onPress={() => __seedDevState('A').then(() => Alert.alert('Dev', 'Seeded: Perfect Yesterday (94)'))}
+              style={{ flex: 1, backgroundColor: '#3EB87A18', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#3EB87A50', alignItems: 'center' }}
+            >
+              <Text style={{ color: '#3EB87A', fontSize: 13, fontWeight: '600' }}>Seed A · Perfect</Text>
+              <Text style={{ color: c.textMuted, fontSize: 10, marginTop: 2 }}>Yesterday score 94</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => __seedDevState('B').then(() => Alert.alert('Dev', 'Seeded: Rough Yesterday (41)'))}
+              style={{ flex: 1, backgroundColor: '#E05C5C18', borderRadius: 10, padding: 12, borderWidth: 1, borderColor: '#E05C5C50', alignItems: 'center' }}
+            >
+              <Text style={{ color: '#E05C5C', fontSize: 13, fontWeight: '600' }}>Seed B · Rough</Text>
+              <Text style={{ color: c.textMuted, fontSize: 10, marginTop: 2 }}>Yesterday score 41</Text>
+            </TouchableOpacity>
           </View>
         </View>
 

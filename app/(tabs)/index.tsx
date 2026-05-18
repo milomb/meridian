@@ -1,23 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, FlatList, TouchableOpacity, Modal,
-  Pressable, TextInput, KeyboardAvoidingView, Platform,
-  Alert, ActivityIndicator, Dimensions, Animated,
+  Pressable, Alert, ActivityIndicator, Dimensions, Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import * as Speech from 'expo-speech';
 import * as Calendar from 'expo-calendar';
-import { Audio } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
-import { sendMessageWithTools, ChatMessage, ProviderConfig } from '../../src/ai/client';
 import { useColors, getCategoryColor } from '../../src/theme/colors';
+import { useBlockOverrideStore } from '../../src/store/blockOverrideStore';
+import { detectCollisions } from '../../src/utils/collisions';
 import {
-  useScheduleStore, getCurrentBlock, getUpcomingBlocks,
+  useScheduleStore, getUpcomingBlocks,
   getTodayBlocks, DayOfWeek, TimeBlock,
 } from '../../src/store/scheduleStore';
 import { useSettingsStore, WeekStartDay } from '../../src/store/settingsStore';
 import { useLocalEventStore, LocalEvent } from '../../src/store/localEventStore';
 import { CurrentBlockBanner } from '../../src/components/CurrentBlockBanner';
+import { JarvisChat } from '../../src/components/JarvisChat';
 import { router } from 'expo-router';
 import {
   usePerformanceStore, computeDailyScore, getScoreColor, getScoreLabel, todayDateKey, fmtDateKey,
@@ -25,6 +24,8 @@ import {
 import { useResolutionStore } from '../../src/store/resolutionStore';
 import { useHealthKit } from '../../src/utils/healthKit';
 import { initAIDataLayer } from '../../src/utils/aiDataLayer';
+import { useJarvisStore, buildJarvisStateJson } from '../../src/store/jarvisStore';
+import { sendToJarvis } from '../../src/services/groqApi';
 
 const { width: SW } = Dimensions.get('window');
 const WEEK_CENTER = 50;
@@ -37,10 +38,6 @@ const READINESS_COLORS: Record<string, string> = {
   average: '#D4A574',
   drained: '#E05C5C',
 };
-
-const JARVIS_BRIEF_SYSTEM = "You are Jarvis, a concise personal assistant. Given the user's day, deliver a 2–3 sentence morning brief: acknowledge what's ahead, note anything worth flagging, end with one practical nudge. Be direct, not cheerful.";
-
-let briefFiredThisSession = false;
 
 function fmtHHMM(d: Date): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -86,42 +83,6 @@ function MiniScoreRing({ score, size = 80, segments = 40 }: { score: number; siz
   );
 }
 
-async function fetchMorningBrief(
-  groqKey: string,
-  userName: string,
-  events: { title: string; startDate: Date; isAllDay?: boolean }[],
-  readiness: string | null,
-): Promise<string> {
-  const firstName = userName ? userName.split(' ')[0] : 'there';
-  const eventSummary = events.length > 0
-    ? events
-        .sort((a, b) => a.startDate.getTime() - b.startDate.getTime())
-        .map((e) =>
-          e.isAllDay
-            ? `- ${e.title} (all day)`
-            : `- ${e.title} at ${e.startDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`
-        )
-        .join('\n')
-    : 'No events scheduled';
-
-  const userMsg = `Name: ${firstName}\nReadiness: ${readiness ?? 'not logged'}\nToday's events:\n${eventSummary}`;
-
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${groqKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      messages: [
-        { role: 'system', content: JARVIS_BRIEF_SYSTEM },
-        { role: 'user', content: userMsg },
-      ],
-      max_tokens: 150,
-    }),
-  });
-  if (!res.ok) throw new Error('Brief unavailable');
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? '';
-}
 
 // ── Helpers ────────────────────────────────────────────────────
 function getWeekDays(offset: number, startDay: WeekStartDay = 'monday'): Date[] {
@@ -235,233 +196,6 @@ function ProgressPill({ label, pct, color }: { label: string; pct: number; color
   );
 }
 
-// ── Voice / JarvisFab ──────────────────────────────────────────
-let cachedVoice: string | undefined;
-async function getBestVoice() {
-  if (cachedVoice !== undefined) return cachedVoice;
-  try {
-    const voices = await Speech.getAvailableVoicesAsync();
-    const en = voices.filter((v) => v.language?.startsWith('en'));
-    cachedVoice = en.find((v) => /premium|enhanced/i.test(v.name ?? ''))?.identifier ?? en[0]?.identifier ?? '';
-  } catch { cachedVoice = ''; }
-  return cachedVoice;
-}
-
-interface FabTurn { role: 'user' | 'assistant'; content: string; }
-
-function JarvisFab({
-  groqApiKey, userName, onActionChange,
-}: {
-  groqApiKey: string; userName: string;
-  onActionChange: (label: string | null) => void;
-}) {
-  const c = useColors();
-  const [open, setOpen] = useState(false);
-  const [phase, setPhase] = useState<'idle' | 'thinking' | 'speaking'>('idle');
-  const [response, setResponse] = useState('');
-  const [showInput, setShowInput] = useState(false);
-  const [inputText, setInputText] = useState('');
-  const [history, setHistory] = useState<FabTurn[]>([]);
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const ringAnim = useRef(new Animated.Value(0)).current;
-
-  const activeKey = groqApiKey;
-
-  useEffect(() => {
-    if (phase !== 'idle') {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, { toValue: 1.18, duration: 900, useNativeDriver: true }),
-          Animated.timing(pulseAnim, { toValue: 1, duration: 900, useNativeDriver: true }),
-        ])
-      ).start();
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(ringAnim, { toValue: 1, duration: 1200, useNativeDriver: true }),
-          Animated.timing(ringAnim, { toValue: 0, duration: 400, useNativeDriver: true }),
-        ])
-      ).start();
-    } else {
-      pulseAnim.stopAnimation();
-      ringAnim.stopAnimation();
-      Animated.spring(pulseAnim, { toValue: 1, useNativeDriver: true }).start();
-      Animated.timing(ringAnim, { toValue: 0, duration: 200, useNativeDriver: true }).start();
-    }
-  }, [phase]);
-
-  const dismiss = () => {
-    Speech.stop();
-    setOpen(false);
-    setPhase('idle');
-    setResponse('');
-    setShowInput(false);
-    setInputText('');
-    setHistory([]);
-    onActionChange(null);
-  };
-
-  const speakReply = async (text: string) => {
-    try { await Audio.setAudioModeAsync({ playsInSilentModeIOS: true, staysActiveInBackground: false }); } catch {}
-    const voice = await getBestVoice();
-    setPhase('speaking');
-    Speech.speak(text, {
-      rate: 0.9, pitch: 1.0, language: 'en-US',
-      ...(voice ? { voice } : {}),
-      onDone: () => setPhase('idle'),
-      onError: () => setPhase('idle'),
-    });
-  };
-
-  const send = async (text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed || phase === 'thinking') return;
-    setInputText('');
-    setPhase('thinking');
-    setResponse('');
-    const newHistory: FabTurn[] = [...history, { role: 'user', content: trimmed }];
-    setHistory(newHistory);
-    try {
-      const chatHistory: ChatMessage[] = newHistory.map((t) => ({ role: t.role, content: t.content }));
-      const config: ProviderConfig = { provider: 'groq', apiKey: groqApiKey };
-      const result = await sendMessageWithTools(chatHistory, userName, config);
-      if (result.actionResult) {
-        onActionChange(result.actionResult);
-        setTimeout(() => onActionChange(null), 4000);
-      } else {
-        onActionChange(null);
-      }
-      setResponse(result.text);
-      setHistory((prev) => [...prev, { role: 'assistant', content: result.text }]);
-      speakReply(result.text);
-    } catch (err: any) {
-      setHistory((prev) => prev.slice(0, -1));
-      setPhase('idle');
-      setResponse(err.message ?? 'Error — check your connection.');
-    }
-  };
-
-  const openModal = () => {
-    if (!activeKey) { Alert.alert('Groq API key required', 'Add a free Groq key in Browse → Settings to use AI.'); return; }
-    setOpen(true);
-    setPhase('idle');
-    setResponse('');
-    setShowInput(true);
-  };
-
-  const ringScale = ringAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.55] });
-  const ringOpacity = ringAnim.interpolate({ inputRange: [0, 0.3, 1], outputRange: [0, 0.3, 0] });
-
-  return (
-    <>
-      <TouchableOpacity onPress={openModal} activeOpacity={0.8} style={{ alignItems: 'center', gap: 4 }}>
-        <View style={{
-          width: 60, height: 60, borderRadius: 30,
-          backgroundColor: activeKey ? c.primary : c.border,
-          alignItems: 'center', justifyContent: 'center',
-          shadowColor: c.primary, shadowOpacity: activeKey ? 0.45 : 0, shadowRadius: 12, shadowOffset: { width: 0, height: 3 }, elevation: 6,
-        }}>
-          <Ionicons name="mic-outline" size={26} color={activeKey ? (c.isDark ? c.bg : '#fff') : c.textMuted} />
-        </View>
-        <Text style={{ color: c.textSecondary, fontSize: 10, fontWeight: '400' }}>
-          {activeKey ? 'Meridian' : 'Set up AI'}
-        </Text>
-      </TouchableOpacity>
-
-      <Modal visible={open} transparent animationType="fade" onRequestClose={dismiss}>
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.94)', justifyContent: 'center', alignItems: 'center' }}>
-          <Pressable style={{ position: 'absolute', inset: 0 }} onPress={phase === 'idle' ? dismiss : undefined} />
-
-          <View style={{ position: 'absolute', top: 80, alignItems: 'center' }}>
-            <Text style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11, fontWeight: '600', letterSpacing: 3, textTransform: 'uppercase' }}>
-              Meridian
-            </Text>
-          </View>
-
-          {response ? (
-            <View style={{ position: 'absolute', top: 120, left: 36, right: 36, alignItems: 'center' }}>
-              <Text style={{ color: 'rgba(255,255,255,0.85)', fontSize: 18, fontWeight: '300', textAlign: 'center', lineHeight: 28 }}>
-                {response}
-              </Text>
-              {phase === 'speaking' && (
-                <Text style={{ color: 'rgba(255,255,255,0.3)', fontSize: 12, marginTop: 14, letterSpacing: 2 }}>● ● ●</Text>
-              )}
-            </View>
-          ) : phase === 'thinking' ? (
-            <View style={{ position: 'absolute', top: 160, alignItems: 'center' }}>
-              <ActivityIndicator color="rgba(255,255,255,0.5)" />
-              <Text style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, marginTop: 10, fontWeight: '300' }}>thinking</Text>
-            </View>
-          ) : null}
-
-          <View style={{ alignItems: 'center', justifyContent: 'center', width: 120, height: 120 }}>
-            <Animated.View style={{
-              position: 'absolute', width: 100, height: 100, borderRadius: 50,
-              borderWidth: 1, borderColor: c.primary,
-              transform: [{ scale: ringScale }], opacity: ringOpacity,
-            }} />
-            <Animated.View style={{
-              width: 88, height: 88, borderRadius: 44,
-              backgroundColor: phase !== 'idle' ? c.primary : 'rgba(255,255,255,0.06)',
-              borderWidth: 1,
-              borderColor: phase !== 'idle' ? c.primary : 'rgba(255,255,255,0.12)',
-              alignItems: 'center', justifyContent: 'center',
-              transform: [{ scale: pulseAnim }],
-            }}>
-              <Ionicons
-                name={phase === 'speaking' ? 'volume-high-outline' : 'mic-outline'}
-                size={34}
-                color={phase !== 'idle' ? (c.isDark ? c.bg : '#fff') : 'rgba(255,255,255,0.5)'}
-              />
-            </Animated.View>
-          </View>
-
-          <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
-            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-              {showInput && (
-                <View style={{ padding: 24, paddingBottom: 48, gap: 12 }}>
-                  <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-end' }}>
-                    <TextInput
-                      style={{
-                        flex: 1, backgroundColor: 'rgba(255,255,255,0.08)',
-                        borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
-                        padding: 14, color: '#fff', fontSize: 15, fontWeight: '300',
-                      }}
-                      value={inputText}
-                      onChangeText={setInputText}
-                      placeholder="Speak or type, then tap ↑ …"
-                      placeholderTextColor="rgba(255,255,255,0.25)"
-                      autoFocus
-                      returnKeyType="send"
-                      blurOnSubmit
-                      onSubmitEditing={() => send(inputText)}
-                    />
-                    <TouchableOpacity
-                      onPress={() => send(inputText)}
-                      disabled={!inputText.trim() || phase === 'thinking'}
-                      style={{
-                        width: 44, height: 44, borderRadius: 22,
-                        backgroundColor: inputText.trim() && phase !== 'thinking' ? c.primary : 'rgba(255,255,255,0.08)',
-                        alignItems: 'center', justifyContent: 'center',
-                      }}
-                    >
-                      <Ionicons name="arrow-up" size={18} color={inputText.trim() && phase !== 'thinking' ? (c.isDark ? c.bg : '#fff') : 'rgba(255,255,255,0.3)'} />
-                    </TouchableOpacity>
-                  </View>
-                  <Text style={{ color: 'rgba(255,255,255,0.2)', fontSize: 12, textAlign: 'center', marginTop: 4 }}>
-                    Use 🎙 on keyboard to dictate, then tap ↑ to send
-                  </Text>
-                  <TouchableOpacity onPress={dismiss} style={{ alignItems: 'center', paddingVertical: 6 }}>
-                    <Text style={{ color: 'rgba(255,255,255,0.2)', fontSize: 13 }}>Dismiss</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-            </KeyboardAvoidingView>
-          </View>
-        </View>
-      </Modal>
-    </>
-  );
-}
 
 // ── Today screen ───────────────────────────────────────────────
 export default function TodayScreen() {
@@ -479,8 +213,10 @@ export default function TodayScreen() {
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [calEvents, setCalEvents] = useState<Map<string, CalEvent[]>>(new Map());
   const [calGranted, setCalGranted] = useState(false);
-  const [fabActionLabel, setFabActionLabel] = useState<string | null>(null);
+  const [jarvisChatOpen, setJarvisChatOpen] = useState(false);
+  const [jarvisInitialMsg, setJarvisInitialMsg] = useState<string | null>(null);
 
+  const { overrides: blockOverrides, load: loadOverrides, getOverride: getBlockOverride } = useBlockOverrideStore();
   const {
     todayEntry: perfEntry, morningDone, eveningDone,
     load: loadPerf, loaded: perfLoaded,
@@ -489,10 +225,12 @@ export default function TodayScreen() {
   const { stepGoal, sleepTarget } = useSettingsStore();
   const { steps, sleepHours } = useHealthKit();
   const calEventsRef = useRef<Map<string, CalEvent[]>>(new Map());
-  const [briefText, setBriefText] = useState<string | null>(null);
-  const [briefLoading, setBriefLoading] = useState(false);
-  const [briefDismissed, setBriefDismissed] = useState(false);
-  const [briefTrigger, setBriefTrigger] = useState(0);
+  const {
+    load: loadJarvis,
+    briefingText, briefingLoading, briefingBannerVisible,
+    setBriefingText, setBriefingLoading, setBriefingBannerVisible,
+    hasBriefingRunToday, markBriefingRanToday, clearBriefingFlag,
+  } = useJarvisStore();
   // No dismiss state — banner always shows while there are unresolved past blocks
 
   // Animation refs for the day popup: backdrop fades in, sheet slides up
@@ -500,7 +238,7 @@ export default function TodayScreen() {
   const backdropAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => { const id = setInterval(() => setNow(new Date()), 30000); return () => clearInterval(id); }, []);
-  useEffect(() => { loadSchedule(); loadLocalEvents(); getBestVoice(); loadPerf(); loadRes(); initAIDataLayer(); }, []);
+  useEffect(() => { loadSchedule(); loadLocalEvents(); loadPerf(); loadRes(); loadOverrides(); loadJarvis(); initAIDataLayer(); }, []);
 
   // Always-reactive unresolved items — re-evaluates whenever blocks/resolutions/time change
   const unresolvedItems = useMemo(() => {
@@ -527,19 +265,27 @@ export default function TodayScreen() {
     return items.sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime));
   }, [resLoaded, blocks, resolutions, now]);
 
+  // Morning briefing — fires once per calendar day, flag persisted in AsyncStorage
   useEffect(() => {
     if (!groqApiKey) return;
-    if (briefTrigger === 0 && briefFiredThisSession) return;
-    briefFiredThisSession = true;
-    setBriefDismissed(false);
-    setBriefLoading(true);
-    setBriefText(null);
-    const todayKey = new Date().toDateString();
-    const events = calEventsRef.current.get(todayKey) ?? [];
-    fetchMorningBrief(groqApiKey, userName, events, perfEntry?.state ?? null)
-      .then((text) => { setBriefText(text); setBriefLoading(false); })
-      .catch(() => setBriefLoading(false));
-  }, [groqApiKey, briefTrigger]);
+    (async () => {
+      const alreadyRan = await hasBriefingRunToday();
+      if (alreadyRan) return;
+      // Write flag immediately so a crash/close mid-briefing doesn't retrigger
+      await markBriefingRanToday();
+      setBriefingLoading(true);
+      try {
+        const stateJson = buildJarvisStateJson();
+        const response = await sendToJarvis(groqApiKey, [{ role: 'user', content: '[TRIGGER_MORNING_BRIEFING]' }], stateJson);
+        setBriefingText(response.jarvis_speech);
+        setBriefingBannerVisible(true);
+      } catch {
+        // silent fail — no banner shown
+      } finally {
+        setBriefingLoading(false);
+      }
+    })();
+  }, [groqApiKey]);
   useEffect(() => {
     Calendar.getCalendarPermissionsAsync().then(({ status }) => {
       if (status === 'granted') { setCalGranted(true); fetchWeekEvents(0); }
@@ -648,10 +394,16 @@ export default function TodayScreen() {
 
   const weekDays = getWeekDays(weekOffset, weekStartDay);
   const todayStr = now.toDateString();
-  const currentBlock = getCurrentBlock(blocks);
   const upcomingBlocks = getUpcomingBlocks(blocks, 3);
   const nowTimeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
   const todayBlocks = getTodayBlocks(blocks);
+  // Override-aware current block: if a block was moved today, match against override times
+  const currentBlock = todayBlocks
+    .map((b) => {
+      const ov = getBlockOverride(b.id, fmtDateKey(now));
+      return { ...b, startTime: ov?.overrideStart ?? b.startTime, endTime: ov?.overrideEnd ?? b.endTime };
+    })
+    .find((b) => b.startTime <= nowTimeStr && nowTimeStr < b.endTime) ?? null;
 
   // Merge Apple Calendar events + local events for today
   const todayLocalEvts: CalEvent[] = localEvents
@@ -730,12 +482,23 @@ export default function TodayScreen() {
               </Text>
               {(() => {
                 const busy = getDayBusyness(d, calEvents, blocks, localEvents);
+                const dKey = fmtDateKey(d);
+                const dDow = d.getDay() as DayOfWeek;
+                const dBlocks = blocks.filter((b) => b.daysOfWeek.includes(dDow)).map((b) => {
+                  const ov = blockOverrides.find((o) => o.blockId === b.id && o.date === dKey);
+                  return { id: b.id, title: b.title, startTime: ov?.overrideStart ?? b.startTime, endTime: ov?.overrideEnd ?? b.endTime };
+                });
+                const dCollisions = detectCollisions(dBlocks, dayCalEvts);
+                const hasConflicts = dCollisions.some((col) => col.type !== 'event-event');
                 return (
                   <View style={{ flexDirection: 'row', gap: 3, alignItems: 'center', justifyContent: 'center', height: 5 }}>
                     {hasEvents && (
                       <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: isToday ? c.primary : c.primary + '90' }} />
                     )}
                     <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: busy.color + (isToday ? 'FF' : 'AA') }} />
+                    {hasConflicts && (
+                      <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: '#E05C5C' + (isToday ? 'FF' : 'AA') }} />
+                    )}
                   </View>
                 );
               })()}
@@ -744,7 +507,7 @@ export default function TodayScreen() {
         })}
       </View>
     );
-  }, [calEvents, localEvents, todayStr, weekStartDay, c, openPopup]);
+  }, [calEvents, localEvents, todayStr, weekStartDay, c, openPopup, blocks, blockOverrides]);
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }} edges={['top']}>
@@ -753,20 +516,6 @@ export default function TodayScreen() {
         <View style={{ width: `${dayPct * 100}%`, height: '100%', backgroundColor: c.primary, opacity: 0.65 }} />
       </View>
 
-      {/* Floating action status pill */}
-      {fabActionLabel && (
-        <View style={{ position: 'absolute', top: 28, left: 0, right: 0, zIndex: 99, alignItems: 'center' }}>
-          <View style={{
-            backgroundColor: c.surface, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8,
-            flexDirection: 'row', alignItems: 'center', gap: 8,
-            borderWidth: 1, borderColor: c.border,
-            shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 4,
-          }}>
-            <ActivityIndicator size="small" color={c.primary} />
-            <Text style={{ color: c.primary, fontSize: 13, fontWeight: '500' }}>{fabActionLabel}</Text>
-          </View>
-        </View>
-      )}
 
       {/* Unresolved blocks banner — always visible while there are unresolved past blocks */}
       {unresolvedItems.length > 0 && (
@@ -970,27 +719,50 @@ export default function TodayScreen() {
             </Text>
             {todayBlocks.map((b) => {
               const catColor = getCategoryColor(b.category, customCategories, c);
-              const isPast = b.endTime <= nowTimeStr;
-              const isCurrent = b.startTime <= nowTimeStr && b.endTime > nowTimeStr;
+              const ov = getBlockOverride(b.id, todayKey);
+              const dispStart = ov?.overrideStart ?? b.startTime;
+              const dispEnd = ov?.overrideEnd ?? b.endTime;
+              const isPast = dispEnd <= nowTimeStr;
+              const isCurrent = dispStart <= nowTimeStr && dispEnd > nowTimeStr;
+              const res = getResolution(b.id, todayKey);
+              const isDone = res?.status === 'done';
+              const isSkipped = res?.status === 'skipped';
+              const isMoved = !!ov;
+              const needsResolve = isPast && !res;
               return (
                 <View
                   key={b.id}
                   style={{
                     flexDirection: 'row', alignItems: 'center', backgroundColor: c.surface,
                     borderRadius: 10, padding: 11, marginBottom: 6, gap: 10,
-                    borderWidth: 1, borderColor: isCurrent ? catColor + '60' : c.border,
-                    opacity: isPast ? 0.45 : 1,
+                    borderWidth: 1,
+                    borderColor: isDone ? '#3EB87A40' : isSkipped ? c.border : needsResolve ? '#D4A57450' : isCurrent ? catColor + '60' : c.border,
+                    opacity: isSkipped ? 0.5 : 1,
                   }}
                 >
-                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isCurrent ? catColor : catColor + '80' }} />
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isDone ? '#3EB87A' : isSkipped ? '#888' : needsResolve ? '#D4A574' : isCurrent ? catColor : catColor + '80' }} />
                   <View style={{ flex: 1 }}>
-                    <Text style={{ color: isPast ? c.textSecondary : c.text, fontSize: 13, fontWeight: isCurrent ? '600' : '400' }}>
+                    <Text style={{ color: isDone ? '#3EB87A' : isSkipped ? c.textSecondary : needsResolve ? '#D4A574' : isPast ? c.textSecondary : c.text, fontSize: 13, fontWeight: isCurrent ? '600' : '400', textDecorationLine: isSkipped ? 'line-through' : 'none' }}>
                       {b.title}
                     </Text>
-                    <Text style={{ color: c.textMuted, fontSize: 11, marginTop: 1 }}>{b.startTime} – {b.endTime}</Text>
+                    <Text style={{ color: c.textMuted, fontSize: 11, marginTop: 1, fontStyle: isMoved ? 'italic' : 'normal' }}>
+                      {dispStart} – {dispEnd}{isMoved ? ' · moved' : ''}
+                    </Text>
                   </View>
-                  {isCurrent
+                  {needsResolve ? (
+                    <TouchableOpacity
+                      onPress={() => { setPending(b.id, todayKey); router.push('/(tabs)/schedule'); }}
+                      style={{ backgroundColor: '#D4A57420', borderRadius: 7, paddingHorizontal: 9, paddingVertical: 5, borderWidth: 1, borderColor: '#D4A57460' }}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={{ color: '#D4A574', fontSize: 11, fontWeight: '600' }}>Resolve</Text>
+                    </TouchableOpacity>
+                  ) : isCurrent && !isDone && !isSkipped
                     ? <Text style={{ color: catColor, fontSize: 10, fontWeight: '600' }}>Now</Text>
+                    : isDone
+                    ? <Ionicons name="checkmark-circle" size={16} color="#3EB87A" />
+                    : isSkipped
+                    ? <Ionicons name="close-circle" size={16} color="#888" />
                     : <Text style={{ color: isPast ? c.textMuted : catColor, fontSize: 10, fontWeight: '500', textTransform: 'capitalize' }}>{b.category}</Text>
                   }
                 </View>
@@ -1014,10 +786,84 @@ export default function TodayScreen() {
         )}
       </ScrollView>
 
+      {/* Briefing banner */}
+      {briefingBannerVisible && briefingText && (
+        <TouchableOpacity
+          onPress={() => { setJarvisInitialMsg(briefingText); setJarvisChatOpen(true); setBriefingBannerVisible(false); }}
+          style={{
+            marginHorizontal: 12, marginBottom: 6,
+            backgroundColor: '#3EB87A18',
+            borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10,
+            flexDirection: 'row', alignItems: 'center', gap: 10,
+            borderWidth: 1, borderColor: '#3EB87A60',
+          }}
+          activeOpacity={0.7}
+        >
+          <View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: '#3EB87A', alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>J</Text>
+          </View>
+          <Text style={{ color: '#3EB87A', fontSize: 13, flex: 1, fontWeight: '500' }}>Jarvis has your briefing →</Text>
+          <Ionicons name="chevron-forward" size={14} color="#3EB87A" />
+        </TouchableOpacity>
+      )}
+      {briefingLoading && (
+        <View style={{ marginHorizontal: 12, marginBottom: 6, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <ActivityIndicator size="small" color="#3EB87A" />
+          <Text style={{ color: c.textMuted, fontSize: 12 }}>Jarvis is preparing your briefing…</Text>
+        </View>
+      )}
+
       {/* Jarvis FAB */}
       <View style={{ paddingVertical: 10, alignItems: 'center', backgroundColor: c.bg, borderTopWidth: 1, borderTopColor: c.border }}>
-        <JarvisFab groqApiKey={groqApiKey} userName={userName} onActionChange={setFabActionLabel} />
+        <TouchableOpacity
+          onPress={() => {
+            if (!groqApiKey) {
+              Alert.alert('Groq API key required', 'Add a free Groq key in Settings to use Jarvis.');
+              return;
+            }
+            setJarvisInitialMsg(null);
+            setJarvisChatOpen(true);
+          }}
+          onLongPress={async () => {
+            // [DEV] Long-press to retrigger morning briefing
+            await clearBriefingFlag();
+            setBriefingText(null);
+            setBriefingBannerVisible(false);
+            if (!groqApiKey) return;
+            setBriefingLoading(true);
+            try {
+              const stateJson = buildJarvisStateJson();
+              const response = await sendToJarvis(groqApiKey, [{ role: 'user', content: '[TRIGGER_MORNING_BRIEFING]' }], stateJson);
+              await markBriefingRanToday();
+              setBriefingText(response.jarvis_speech);
+              setBriefingBannerVisible(true);
+            } catch {}
+            setBriefingLoading(false);
+          }}
+          activeOpacity={0.8}
+          style={{ alignItems: 'center', gap: 4 }}
+        >
+          <View style={{
+            width: 60, height: 60, borderRadius: 30,
+            backgroundColor: groqApiKey ? '#3EB87A' : c.border,
+            alignItems: 'center', justifyContent: 'center',
+            shadowColor: '#3EB87A', shadowOpacity: groqApiKey ? 0.45 : 0,
+            shadowRadius: 12, shadowOffset: { width: 0, height: 3 }, elevation: 6,
+          }}>
+            <Text style={{ color: '#fff', fontSize: 20, fontWeight: '700' }}>J</Text>
+          </View>
+          <Text style={{ color: c.textSecondary, fontSize: 10, fontWeight: '400' }}>
+            {groqApiKey ? 'Jarvis' : 'Set up AI'}
+          </Text>
+        </TouchableOpacity>
       </View>
+
+      <JarvisChat
+        visible={jarvisChatOpen}
+        onClose={() => { setJarvisChatOpen(false); setJarvisInitialMsg(null); }}
+        groqApiKey={groqApiKey}
+        initialMessage={jarvisInitialMsg}
+      />
 
       {/* Day detail popup — backdrop fades in instantly, sheet slides up */}
       <Modal visible={!!selectedDate} transparent animationType="none" onRequestClose={closePopup}>

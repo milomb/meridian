@@ -68,11 +68,14 @@ export const useScheduleStore = create<ScheduleStore>((set, get) => ({
     try {
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
       const blocks = raw ? JSON.parse(raw) : DEFAULT_BLOCKS;
-      const migrated = blocks.map((b: TimeBlock) => ({
-        ...b,
-        description: b.description ?? '',
-        weight: b.weight ?? 2,
-      }));
+      const migrated = blocks
+        .filter((b: TimeBlock) => b.startTime && b.endTime && b.title)
+        .map((b: TimeBlock) => ({
+          ...b,
+          description: b.description ?? '',
+          weight: b.weight ?? 2,
+          isFixed: b.isFixed ?? false,
+        }));
       set({ blocks: migrated, loaded: true });
     } catch {
       set({ blocks: DEFAULT_BLOCKS, loaded: true });

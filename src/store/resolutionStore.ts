@@ -24,6 +24,7 @@ interface ResolutionStore {
   pendingDate: string | null;
   load: () => Promise<void>;
   resolveBlock: (blockId: string, date: string, status: ResolutionStatus, outcome?: EventOutcome) => void;
+  unresolveBlock: (blockId: string, date: string) => void;
   getResolution: (blockId: string, date: string) => BlockResolution | undefined;
   setPending: (blockId: string, date: string) => void;
   clearPending: () => void;
@@ -59,6 +60,14 @@ export const useResolutionStore = create<ResolutionStore>((set, get) => ({
       resolution,
       ...get().resolutions.filter((r) => !(r.blockId === blockId && r.date === date)),
     ].slice(0, 500); // cap at 500 entries (~50 days of 10 blocks)
+    set({ resolutions });
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(resolutions));
+  },
+
+  unresolveBlock: (blockId, date) => {
+    const resolutions = get().resolutions.filter(
+      (r) => !(r.blockId === blockId && r.date === date),
+    );
     set({ resolutions });
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(resolutions));
   },
