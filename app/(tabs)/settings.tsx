@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { sendAIMessage } from '../../src/utils/ai';
@@ -15,6 +15,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useColors } from '../../src/theme/colors';
 import { useSettingsStore } from '../../src/store/settingsStore';
+import { useLifeElementStore } from '../../src/store/lifeElementStore';
 import { THEMES, THEME_NAMES, ThemeKey } from '../../src/theme/themes';
 import { useJarvisStore, buildJarvisStateJson, __seedDevState } from '../../src/store/jarvisStore';
 import { sendToJarvis } from '../../src/services/groqApi';
@@ -42,10 +43,10 @@ const THEME_PREVIEWS: Record<ThemeKey, { bg: string; surface: string; primary: s
 export default function SettingsScreen() {
   const c = useColors();
   const {
-    userName, apiKey, groqApiKey, ollamaUrl, ollamaModel, provider, theme, weekStartDay, customCategories,
+    userName, apiKey, groqApiKey, ollamaUrl, ollamaModel, provider, theme, weekStartDay,
     setUserName, setApiKey, setGroqApiKey, setOllamaUrl, setOllamaModel, setProvider, setTheme, setWeekStartDay,
-    addCustomCategory, deleteCustomCategory,
   } = useSettingsStore();
+  const { elements: lifeElements, load: loadElements, addElement, deleteElement } = useLifeElementStore();
 
   const [nameInput, setNameInput] = useState(userName);
   const [keyInput, setKeyInput] = useState(apiKey);
@@ -53,10 +54,11 @@ export default function SettingsScreen() {
   const [ollamaUrlInput, setOllamaUrlInput] = useState(ollamaUrl);
   const [ollamaModelInput, setOllamaModelInput] = useState(ollamaModel || 'llama3.2');
   const [showKey, setShowKey] = useState(false);
-  const [catModalVisible, setCatModalVisible] = useState(false);
-  const [catName, setCatName] = useState('');
-  const [catColor, setCatColor] = useState(PRESET_COLORS[5].color);
-  const [catBg, setCatBg] = useState(PRESET_COLORS[5].bg);
+  const [elemModalVisible, setElemModalVisible] = useState(false);
+  const [elemName, setElemName] = useState('');
+  const [elemEmoji, setElemEmoji] = useState('💡');
+  const [elemColor, setElemColor] = useState(PRESET_COLORS[0].color);
+  const [elemBg, setElemBg] = useState(PRESET_COLORS[0].bg);
 
   const [testing, setTesting] = useState(false);
   const [triggeringBriefing, setTriggeringBriefing] = useState(false);
@@ -98,11 +100,16 @@ export default function SettingsScreen() {
     }
   };
 
-  const addCat = () => {
-    if (!catName.trim()) return;
-    addCustomCategory({ name: catName.trim(), color: catColor, bg: catBg });
-    setCatName('');
-    setCatModalVisible(false);
+  useEffect(() => { loadElements(); }, []);
+
+  const addElem = () => {
+    if (!elemName.trim()) return;
+    addElement({ name: elemName.trim(), emoji: elemEmoji, status: '', color: elemColor, bg: elemBg });
+    setElemName('');
+    setElemEmoji('💡');
+    setElemColor(PRESET_COLORS[0].color);
+    setElemBg(PRESET_COLORS[0].bg);
+    setElemModalVisible(false);
   };
 
   const triggerBriefing = async () => {
@@ -131,10 +138,10 @@ export default function SettingsScreen() {
     }
   };
 
-  const confirmDeleteCat = (id: string, name: string) => {
-    Alert.alert('Delete Category', `Remove "${name}"?`, [
+  const confirmDeleteElem = (id: string, name: string) => {
+    Alert.alert('Remove Element', `Remove "${name}" from Life Overview?`, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => deleteCustomCategory(id) },
+      { text: 'Remove', style: 'destructive', onPress: () => deleteElement(id) },
     ]);
   };
 
@@ -549,35 +556,39 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* Custom Categories */}
+        {/* Life Elements */}
         <View style={s.section}>
-          <Text style={s.sectionLabel}>Custom Categories</Text>
-          <View style={s.catList}>
-            {customCategories.map((cat) => (
-              <View key={cat.id} style={s.catItem}>
-                <View style={[s.catDot, { backgroundColor: cat.color }]} />
-                <Text style={s.catName}>{cat.name}</Text>
-                <TouchableOpacity onPress={() => confirmDeleteCat(cat.id, cat.name)}>
+          <Text style={s.sectionLabel}>Life Elements</Text>
+          <Text style={s.hintText}>
+            These are the areas of life shown in your Life Overview tab and used as block categories.
+          </Text>
+          <View style={[s.catList, { marginTop: 12 }]}>
+            {lifeElements.map((el) => (
+              <View key={el.id} style={s.catItem}>
+                <Text style={{ fontSize: 18 }}>{el.emoji}</Text>
+                <View style={[s.catDot, { backgroundColor: el.color }]} />
+                <Text style={s.catName}>{el.name}</Text>
+                <TouchableOpacity onPress={() => confirmDeleteElem(el.id, el.name)}>
                   <Text style={s.catDelete}>×</Text>
                 </TouchableOpacity>
               </View>
             ))}
           </View>
-          <TouchableOpacity style={s.addCatBtn} onPress={() => setCatModalVisible(true)}>
-            <Text style={s.addCatText}>+ Add Category</Text>
+          <TouchableOpacity style={s.addCatBtn} onPress={() => setElemModalVisible(true)}>
+            <Text style={s.addCatText}>+ Add Element</Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
 
-      {/* Add Category Modal */}
-      <Modal visible={catModalVisible} animationType="slide" presentationStyle="pageSheet">
+      {/* Add Element Modal */}
+      <Modal visible={elemModalVisible} animationType="slide" presentationStyle="pageSheet">
         <View style={s.modal}>
           <View style={s.modalHeader}>
-            <TouchableOpacity onPress={() => setCatModalVisible(false)}>
+            <TouchableOpacity onPress={() => setElemModalVisible(false)}>
               <Text style={s.modalCancel}>Cancel</Text>
             </TouchableOpacity>
-            <Text style={s.modalTitle}>New Category</Text>
-            <TouchableOpacity onPress={addCat}>
+            <Text style={s.modalTitle}>New Life Element</Text>
+            <TouchableOpacity onPress={addElem}>
               <Text style={s.modalSave}>Add</Text>
             </TouchableOpacity>
           </View>
@@ -586,11 +597,31 @@ export default function SettingsScreen() {
             <Text style={s.fieldLabel}>Name</Text>
             <TextInput
               style={s.input}
-              value={catName}
-              onChangeText={setCatName}
-              placeholder="Category name"
+              value={elemName}
+              onChangeText={setElemName}
+              placeholder="e.g. Finance, Social, Health"
               placeholderTextColor={c.textMuted}
               autoFocus
+            />
+
+            <Text style={s.fieldLabel}>Emoji</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 4 }}>
+              {['💡', '❤️', '💰', '🎨', '🤝', '🏃', '🧠', '🌿', '⚡', '🎯', '🛡️', '🎵', '🌍', '📈'].map((em) => (
+                <TouchableOpacity
+                  key={em}
+                  onPress={() => setElemEmoji(em)}
+                  style={{ width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: elemEmoji === em ? c.primaryFaint : c.surface, borderWidth: 1, borderColor: elemEmoji === em ? c.primary : c.border }}
+                >
+                  <Text style={{ fontSize: 22 }}>{em}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <TextInput
+              style={[s.input, { marginTop: 8 }]}
+              value={elemEmoji}
+              onChangeText={setElemEmoji}
+              placeholder="Or type any emoji"
+              placeholderTextColor={c.textMuted}
             />
 
             <Text style={s.fieldLabel}>Colour</Text>
@@ -598,10 +629,10 @@ export default function SettingsScreen() {
               {PRESET_COLORS.map((p) => (
                 <TouchableOpacity
                   key={p.color}
-                  style={[s.colorSwatch, { backgroundColor: p.color }, catColor === p.color && s.colorSwatchSelected]}
-                  onPress={() => { setCatColor(p.color); setCatBg(p.bg); }}
+                  style={[s.colorSwatch, { backgroundColor: p.color }, elemColor === p.color && s.colorSwatchSelected]}
+                  onPress={() => { setElemColor(p.color); setElemBg(p.bg); }}
                 >
-                  {catColor === p.color && <Text style={{ color: '#fff', fontWeight: '700', fontSize: 16 }}>✓</Text>}
+                  {elemColor === p.color && <Text style={{ color: '#fff', fontWeight: '700', fontSize: 16 }}>✓</Text>}
                 </TouchableOpacity>
               ))}
             </View>

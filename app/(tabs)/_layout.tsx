@@ -143,6 +143,15 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="overview"
+        options={{
+          tabBarLabel: 'Life',
+          tabBarIcon: ({ focused, color }) => (
+            <Ionicons name={focused ? 'layers' : 'layers-outline'} size={22} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="chat"
         options={{
           tabBarLabel: 'Chat',
@@ -156,9 +165,10 @@ export default function TabLayout() {
         options={{ tabBarButton: () => <BrowseTabButton /> }}
       />
 
-      {/* Hidden — accessible via Browse. display:'none' removes them from flex layout */}
+      {/* Hidden — accessible via router.push. display:'none' removes them from flex layout */}
       <Tabs.Screen name="calendar" options={{ tabBarButton: () => null, tabBarItemStyle: { display: 'none' } }} />
       <Tabs.Screen name="settings" options={{ tabBarButton: () => null, tabBarItemStyle: { display: 'none' } }} />
+      <Tabs.Screen name="protocols" options={{ tabBarButton: () => null, tabBarItemStyle: { display: 'none' } }} />
     </Tabs>
   );
 }

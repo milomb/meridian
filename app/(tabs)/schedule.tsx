@@ -1,19 +1,18 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Modal, TextInput, Switch, Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Calendar from 'expo-calendar';
-import { useColors, getCategoryColor, getCategoryBg } from '../../src/theme/colors';
-import { useSettingsStore } from '../../src/store/settingsStore';
+import { useColors, getCategoryColor } from '../../src/theme/colors';
+import { useLifeElementStore } from '../../src/store/lifeElementStore';
 import { useScheduleStore, TimeBlock, DayOfWeek } from '../../src/store/scheduleStore';
 import { useLocalEventStore } from '../../src/store/localEventStore';
 import { useResolutionStore } from '../../src/store/resolutionStore';
 import { useBlockOverrideStore } from '../../src/store/blockOverrideStore';
 import { DayTimeline, CalEvent } from '../../src/components/DayTimeline';
 
-const BUILT_IN_CATEGORIES = ['work', 'training', 'personal', 'rest', 'nutrition', 'learning'];
 const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
 interface BlockFormState {
@@ -40,7 +39,7 @@ function fmtDateKey(d: Date): string {
 export default function ScheduleScreen() {
   const c = useColors();
   const { blocks, load, addBlock, updateBlock, deleteBlock } = useScheduleStore();
-  const { customCategories } = useSettingsStore();
+  const { elements: lifeElements, load: loadElements } = useLifeElementStore();
   const { events: localEvents, load: loadLocalEvents } = useLocalEventStore();
   const { load: loadResolutions, pendingBlockId, pendingDate, clearPending, getResolution } = useResolutionStore();
   const { load: loadOverrides, getOverride } = useBlockOverrideStore();
@@ -51,12 +50,30 @@ export default function ScheduleScreen() {
   const [form, setForm] = useState<BlockFormState>(emptyForm);
   const [view, setView] = useState<'list' | 'day'>('day');
   const [selectedDay, setSelectedDay] = useState(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; });
-  const [dayCalEvents, setDayCalEvents] = useState<CalEvent[]>([]);
+  const [dayAppleEvents, setDayAppleEvents] = useState<CalEvent[]>([]);
   const [calGranted, setCalGranted] = useState(false);
 
-  const allCategories = [...BUILT_IN_CATEGORIES, ...customCategories.map((cc) => cc.name)];
+  // Reactive: merge Apple Calendar events with local events so add/delete
+  // of local events is reflected immediately without a manual re-fetch.
+  const dayCalEvents = useMemo<CalEvent[]>(() => {
+    const dateKey = fmtDateKey(selectedDay);
+    const start = new Date(selectedDay); start.setHours(0, 0, 0, 0);
+    const end = new Date(selectedDay); end.setHours(23, 59, 59, 999);
+    const localEvts: CalEvent[] = localEvents
+      .filter((e) => e.date === dateKey)
+      .map((e) => {
+        if (e.isAllDay) return { id: e.id, title: e.title, startDate: start, endDate: end, color: e.color, isLocal: true, isAllDay: true };
+        const [sh, sm] = e.startTime.split(':').map(Number);
+        const [eh, em] = e.endTime.split(':').map(Number);
+        const s = new Date(selectedDay); s.setHours(sh, sm, 0, 0);
+        const ev = new Date(selectedDay); ev.setHours(eh, em, 0, 0);
+        return { id: e.id, title: e.title, startDate: s, endDate: ev, color: e.color, isLocal: true };
+      });
+    return [...dayAppleEvents, ...localEvts];
+  }, [dayAppleEvents, localEvents, selectedDay]);
 
-  useEffect(() => { load(); loadLocalEvents(); loadResolutions(); loadOverrides(); }, []);
+
+  useEffect(() => { load(); loadLocalEvents(); loadResolutions(); loadOverrides(); loadElements(); }, []);
 
   // Deep-link from unresolved banner: navigate to the target day and auto-open the sheet
   useEffect(() => {
@@ -75,34 +92,22 @@ export default function ScheduleScreen() {
 
   useEffect(() => {
     if (!calGranted) return;
-    fetchDayEvents(selectedDay);
+    fetchAppleEvents(selectedDay);
   }, [calGranted, selectedDay]);
 
-  const fetchDayEvents = async (day: Date) => {
+  const fetchAppleEvents = async (day: Date) => {
     try {
       const start = new Date(day); start.setHours(0, 0, 0, 0);
       const end = new Date(day); end.setHours(23, 59, 59, 999);
       const cals = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
       const colorMap = Object.fromEntries(cals.map((cal) => [cal.id, cal.color]));
       const events = await Calendar.getEventsAsync(cals.map((cal) => cal.id), start, end);
-      const calEvts: CalEvent[] = events.map((e) => ({
+      setDayAppleEvents(events.map((e) => ({
         id: e.id, title: e.title,
         startDate: new Date(e.startDate), endDate: new Date(e.endDate),
         color: colorMap[e.calendarId], isAllDay: e.allDay,
-      }));
-      const dateKey = fmtDateKey(day);
-      const localEvts: CalEvent[] = localEvents
-        .filter((e) => e.date === dateKey)
-        .map((e) => {
-          if (e.isAllDay) return { id: e.id, title: e.title, startDate: start, endDate: end, color: e.color, isLocal: true, isAllDay: true };
-          const [sh, sm] = e.startTime.split(':').map(Number);
-          const [eh, em] = e.endTime.split(':').map(Number);
-          const s = new Date(day); s.setHours(sh, sm, 0, 0);
-          const ev = new Date(day); ev.setHours(eh, em, 0, 0);
-          return { id: e.id, title: e.title, startDate: s, endDate: ev, color: e.color, isLocal: true };
-        });
-      setDayCalEvents([...calEvts, ...localEvts]);
-    } catch { setDayCalEvents([]); }
+      })));
+    } catch { setDayAppleEvents([]); }
   };
 
   const requestCalPermission = async () => {
@@ -169,7 +174,7 @@ export default function ScheduleScreen() {
             scheduleBlocks={blocks}
             calEvents={dayCalEvents}
             c={c}
-            customCategories={customCategories}
+            customCategories={lifeElements}
             onDayChange={(d) => setSelectedDay(d)}
             pendingOpenBlockId={pendingBlockId}
             pendingOpenDate={pendingDate}
@@ -190,7 +195,7 @@ export default function ScheduleScreen() {
       ) : (
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20, paddingTop: 0, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
           {sorted.map((b) => {
-            const catColor = getCategoryColor(b.category, customCategories, c);
+            const catColor = getCategoryColor(b.category, lifeElements, c);
             const isToday = b.daysOfWeek.includes(todayDow);
             const todayRes = isToday ? getResolution(b.id, todayKey) : null;
             const todayOv = isToday ? getOverride(b.id, todayKey) : null;
@@ -269,15 +274,18 @@ export default function ScheduleScreen() {
               </View>
             </View>
 
-            <FieldLabel text="Category" c={c} />
+            <FieldLabel text="Life Element" c={c} />
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {allCategories.map((cat) => {
-                const catColor = getCategoryColor(cat, customCategories, c);
-                const catBg = getCategoryBg(cat, customCategories, c);
-                const active = form.category === cat;
+              {lifeElements.map((el) => {
+                const active = form.category.toLowerCase() === el.name.toLowerCase();
                 return (
-                  <TouchableOpacity key={cat} onPress={() => setForm((f) => ({ ...f, category: cat }))} style={{ borderRadius: 8, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 1, borderColor: active ? catColor : c.border, backgroundColor: active ? catBg : c.surface }}>
-                    <Text style={{ color: active ? catColor : c.textSecondary, fontSize: 13, textTransform: 'capitalize' }}>{cat}</Text>
+                  <TouchableOpacity
+                    key={el.id}
+                    onPress={() => setForm((f) => ({ ...f, category: el.name.toLowerCase() }))}
+                    style={{ borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1, borderColor: active ? el.color : c.border, backgroundColor: active ? el.bg : c.surface, flexDirection: 'row', alignItems: 'center', gap: 6 }}
+                  >
+                    <Text style={{ fontSize: 14 }}>{el.emoji}</Text>
+                    <Text style={{ color: active ? el.color : c.textSecondary, fontSize: 13 }}>{el.name}</Text>
                   </TouchableOpacity>
                 );
               })}

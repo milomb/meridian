@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useColors, getCategoryColor, getCategoryBg } from '../theme/colors';
-import { useSettingsStore } from '../store/settingsStore';
+import { useLifeElementStore } from '../store/lifeElementStore';
 import { TimeBlock, blockProgressPercent } from '../store/scheduleStore';
 
 interface Props {
@@ -11,7 +11,7 @@ interface Props {
 
 export function CurrentBlockBanner({ block }: Props) {
   const c = useColors();
-  const { customCategories } = useSettingsStore();
+  const { elements: lifeElements } = useLifeElementStore();
   const [progress, setProgress] = useState(() => blockProgressPercent(block));
 
   useEffect(() => {
@@ -19,8 +19,8 @@ export function CurrentBlockBanner({ block }: Props) {
     return () => clearInterval(id);
   }, [block]);
 
-  const catColor = getCategoryColor(block.category, customCategories, c);
-  const catBg = getCategoryBg(block.category, customCategories, c);
+  const catColor = getCategoryColor(block.category, lifeElements, c);
+  const catBg = getCategoryBg(block.category, lifeElements, c);
 
   return (
     <View style={{

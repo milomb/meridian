@@ -26,6 +26,8 @@ import { useHealthKit } from '../../src/utils/healthKit';
 import { initAIDataLayer } from '../../src/utils/aiDataLayer';
 import { useJarvisStore, buildJarvisStateJson } from '../../src/store/jarvisStore';
 import { sendToJarvis } from '../../src/services/groqApi';
+import { useProtocolStore } from '../../src/store/protocolStore';
+import { useLifeElementStore, computeWeeklyMinutes, fmtWeeklyTime } from '../../src/store/lifeElementStore';
 
 const { width: SW } = Dimensions.get('window');
 const WEEK_CENTER = 50;
@@ -201,7 +203,7 @@ function ProgressPill({ label, pct, color }: { label: string; pct: number; color
 export default function TodayScreen() {
   const c = useColors();
   const { blocks, load: loadSchedule } = useScheduleStore();
-  const { userName, groqApiKey, customCategories, weekStartDay } = useSettingsStore();
+  const { userName, groqApiKey, weekStartDay } = useSettingsStore();
   const { events: localEvents, load: loadLocalEvents, deleteEvent: deleteLocalEvent } = useLocalEventStore();
 
   const [now, setNow] = useState(new Date());
@@ -218,9 +220,11 @@ export default function TodayScreen() {
 
   const { overrides: blockOverrides, load: loadOverrides, getOverride: getBlockOverride } = useBlockOverrideStore();
   const {
-    todayEntry: perfEntry, morningDone, eveningDone,
+    todayEntry: perfEntry,
     load: loadPerf, loaded: perfLoaded,
   } = usePerformanceStore();
+  const { getTodayScore: getProtoScore, load: loadProtos } = useProtocolStore();
+  const { elements: lifeElements, load: loadElements } = useLifeElementStore();
   const { resolutions, loaded: resLoaded, load: loadRes, getResolution, setPending } = useResolutionStore();
   const { stepGoal, sleepTarget } = useSettingsStore();
   const { steps, sleepHours } = useHealthKit();
@@ -238,7 +242,7 @@ export default function TodayScreen() {
   const backdropAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => { const id = setInterval(() => setNow(new Date()), 30000); return () => clearInterval(id); }, []);
-  useEffect(() => { loadSchedule(); loadLocalEvents(); loadPerf(); loadRes(); loadOverrides(); loadJarvis(); initAIDataLayer(); }, []);
+  useEffect(() => { loadSchedule(); loadLocalEvents(); loadPerf(); loadRes(); loadOverrides(); loadJarvis(); loadProtos(); loadElements(); initAIDataLayer(); }, []);
 
   // Always-reactive unresolved items — re-evaluates whenever blocks/resolutions/time change
   const unresolvedItems = useMemo(() => {
@@ -433,8 +437,10 @@ export default function TodayScreen() {
   const blockWeightedDone = todayBlocksForScore
     .filter((b) => getResolution(b.id, todayKey)?.status === 'done')
     .reduce((s, b) => s + (b.weight ?? 2), 0);
+  const { requiredCompleted: protoCompleted, requiredTotal: protoTotal } = getProtoScore();
   const widgetScore = computeDailyScore({
-    morningDone, eveningDone,
+    protocolRequiredCompleted: protoCompleted,
+    protocolRequiredTotal: protoTotal,
     blockWeightedDone, blockWeightedTotal,
     steps, sleepHours, stepGoal, sleepTarget,
   });
@@ -654,7 +660,7 @@ export default function TodayScreen() {
                   </View>
                   <View style={{ backgroundColor: c.surfaceAlt, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3 }}>
                     <Text style={{ color: c.textSecondary, fontSize: 10 }}>
-                      ☀️{morningDone ? '✓' : '✗'} 🌙{eveningDone ? '✓' : '✗'}
+                      🎯 {protoTotal > 0 ? `${protoCompleted}/${protoTotal}` : '—'}
                     </Text>
                   </View>
                   <View style={{ backgroundColor: c.surfaceAlt, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3 }}>
@@ -673,6 +679,41 @@ export default function TodayScreen() {
           </View>
           <Ionicons name="chevron-forward" size={16} color={c.textMuted} />
         </TouchableOpacity>
+
+        {/* Life Overview widget */}
+        {lifeElements.length > 0 && (() => {
+          const topElements = [...lifeElements]
+            .map((el) => ({ el, mins: computeWeeklyMinutes(el.name, blocks) }))
+            .filter(({ mins }) => mins > 0)
+            .sort((a, b) => b.mins - a.mins)
+            .slice(0, 3);
+          if (topElements.length === 0) return null;
+          return (
+            <TouchableOpacity
+              onPress={() => router.push('/(tabs)/overview' as any)}
+              style={{
+                marginHorizontal: 12, marginTop: 14,
+                backgroundColor: c.surface, borderRadius: 14,
+                padding: 14, borderWidth: 1, borderColor: c.border,
+              }}
+              activeOpacity={0.7}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+                <Text style={{ color: c.textSecondary, fontSize: 10, fontWeight: '600', letterSpacing: 1.2, textTransform: 'uppercase', flex: 1 }}>Life Overview</Text>
+                <Ionicons name="chevron-forward" size={14} color={c.textMuted} />
+              </View>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                {topElements.map(({ el, mins }) => (
+                  <View key={el.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: el.bg, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}>
+                    <Text style={{ fontSize: 13 }}>{el.emoji}</Text>
+                    <Text style={{ color: el.color, fontSize: 12, fontWeight: '500' }}>{el.name}</Text>
+                    <Text style={{ color: el.color + 'AA', fontSize: 11 }}>· {fmtWeeklyTime(mins)}</Text>
+                  </View>
+                ))}
+              </View>
+            </TouchableOpacity>
+          );
+        })()}
 
         {/* Current block */}
         <View style={{ marginHorizontal: 12, marginTop: 14 }}>
@@ -718,7 +759,7 @@ export default function TodayScreen() {
               Today's Plan
             </Text>
             {todayBlocks.map((b) => {
-              const catColor = getCategoryColor(b.category, customCategories, c);
+              const catColor = getCategoryColor(b.category, lifeElements, c);
               const ov = getBlockOverride(b.id, todayKey);
               const dispStart = ov?.overrideStart ?? b.startTime;
               const dispEnd = ov?.overrideEnd ?? b.endTime;

@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, Switch } from 'react-native';
+import { View, Text, TouchableOpacity, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { router } from 'expo-router';
 import { useColors } from '../../src/theme/colors';
 import {
   usePerformanceStore, computeDailyScore, getScoreColor, getScoreLabel, todayDateKey,
@@ -11,6 +12,7 @@ import { useResolutionStore } from '../../src/store/resolutionStore';
 import { useScheduleStore, getTodayBlocks, DayOfWeek } from '../../src/store/scheduleStore';
 import { useSettingsStore } from '../../src/store/settingsStore';
 import { useHealthKit } from '../../src/utils/healthKit';
+import { useProtocolStore } from '../../src/store/protocolStore';
 
 // ── Score ring (segment-based, no SVG needed) ──────────────────────
 function ScoreRing({ score, size = 200, strokeWidth = 14, segments = 60, children }: {
@@ -76,18 +78,18 @@ let scoreSaveTimer: ReturnType<typeof setTimeout> | null = null;
 export default function PerformanceScreen() {
   const c = useColors();
   const {
-    morningDone, eveningDone, readiness,
-    history, loaded,
-    load, setReadiness, toggleMorning, toggleEvening, saveDailyScore, getWeeklyAverage,
+    readiness, history, loaded,
+    load, setReadiness, saveDailyScore, getWeeklyAverage,
   } = usePerformanceStore();
   const { resolutions, loaded: resLoaded, load: loadRes, getResolution } = useResolutionStore();
   const { blocks, load: loadBlocks } = useScheduleStore();
   const { stepGoal, sleepTarget, weeklyAverageMode } = useSettingsStore();
   const { steps, sleepHours } = useHealthKit();
+  const { protocols, loaded: protoLoaded, load: loadProtos, getTodayScore, getCompletionState, sortedActiveProtocols } = useProtocolStore();
 
   const [viewMode, setViewMode] = useState<'daily' | 'weekly'>('daily');
 
-  useEffect(() => { load(); loadRes(); loadBlocks(); }, []);
+  useEffect(() => { load(); loadRes(); loadBlocks(); loadProtos(); }, []);
 
   const todayKey = todayDateKey();
   const todayDow = new Date().getDay() as DayOfWeek;
@@ -100,8 +102,11 @@ export default function PerformanceScreen() {
   const resolvedCount = todayBlocks.filter((b) => getResolution(b.id, todayKey)?.status === 'done').length;
   const skippedCount = todayBlocks.filter((b) => getResolution(b.id, todayKey)?.status === 'skipped').length;
 
+  const { requiredCompleted: protoCompleted, requiredTotal: protoTotal } = getTodayScore();
+
   const score = computeDailyScore({
-    morningDone, eveningDone,
+    protocolRequiredCompleted: protoCompleted,
+    protocolRequiredTotal: protoTotal,
     blockWeightedDone, blockWeightedTotal,
     steps, sleepHours, stepGoal, sleepTarget,
   });
@@ -111,11 +116,11 @@ export default function PerformanceScreen() {
 
   // Persist score to history (debounced)
   useEffect(() => {
-    if (!loaded || !resLoaded) return;
+    if (!loaded || !resLoaded || !protoLoaded) return;
     if (scoreSaveTimer) clearTimeout(scoreSaveTimer);
     scoreSaveTimer = setTimeout(() => saveDailyScore(score), 1500);
     return () => { if (scoreSaveTimer) clearTimeout(scoreSaveTimer); };
-  }, [score, loaded, resLoaded]);
+  }, [score, loaded, resLoaded, protoLoaded]);
 
   const weeklyAvg = getWeeklyAverage(weeklyAverageMode);
   const displayScore = viewMode === 'weekly' ? (weeklyAvg ?? 0) : score;
@@ -127,7 +132,24 @@ export default function PerformanceScreen() {
   const stepsPct = steps !== null ? Math.min(1, steps / stepGoal) : null;
   const sleepPct = sleepHours !== null ? Math.min(1, sleepHours / sleepTarget) : null;
   const blocksPct = blockWeightedTotal > 0 ? blockWeightedDone / blockWeightedTotal : 0;
-  const protocolPct = (morningDone ? 0.5 : 0) + (eveningDone ? 0.5 : 0);
+  const protocolPct = protoTotal > 0 ? protoCompleted / protoTotal : 1;
+
+  // Protocol summary for breakdown row
+  const activeProtos = sortedActiveProtocols().filter((p) => p.activeDays.includes(todayDow));
+  const protoSummaryText = (() => {
+    if (activeProtos.length === 0) return 'No protocols today';
+    if (activeProtos.length <= 2) {
+      return activeProtos.map((p) => {
+        const s = getCompletionState(p.id, todayKey);
+        return `${p.icon} ${s === 'complete' ? '✓' : s === 'partial' ? '◑' : s === 'missed' ? '✗' : '·'}`;
+      }).join('  ');
+    }
+    const doneCount = activeProtos.filter((p) => {
+      const s = getCompletionState(p.id, todayKey);
+      return s === 'complete' || s === 'partial';
+    }).length;
+    return `${doneCount}/${activeProtos.length} complete`;
+  })();
 
   function fmtSteps(n: number | null): string {
     if (n === null) return '—';
@@ -194,40 +216,25 @@ export default function PerformanceScreen() {
           </Text>
 
           {/* Protocols */}
-          <View style={{ paddingHorizontal: 16, paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: c.border + '88' }}>
+          <TouchableOpacity
+            onPress={() => router.push('/(tabs)/protocols' as any)}
+            activeOpacity={0.7}
+            style={{ paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: c.border + '88' }}
+          >
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
               <Text style={{ color: c.text, fontSize: 14, fontWeight: '500' }}>Protocols</Text>
-              <Text style={{ color: c.textSecondary, fontSize: 12 }}>
-                {morningDone ? '☀️ ✓' : '☀️ ✗'}  {eveningDone ? '🌙 ✓' : '🌙 ✗'}
-              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={{ color: c.textSecondary, fontSize: 12 }}>{protoSummaryText}</Text>
+                <Ionicons name="chevron-forward" size={13} color={c.textMuted} />
+              </View>
             </View>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
               <FillBar pct={protocolPct} color={getScoreColor(protocolPct * 100)} c={c} />
               <Text style={{ color: c.textMuted, fontSize: 11, minWidth: 48, textAlign: 'right' }}>
-                {morningDone && eveningDone ? '2/2' : morningDone || eveningDone ? '1/2' : '0/2'}
+                {protoTotal > 0 ? `${protoCompleted}/${protoTotal}` : '—'}
               </Text>
             </View>
-            <View style={{ flexDirection: 'row', gap: 10 }}>
-              <TouchableOpacity
-                onPress={toggleMorning}
-                style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10, backgroundColor: morningDone ? '#3EB87A18' : c.surfaceAlt, borderWidth: 1.5, borderColor: morningDone ? '#3EB87A' : c.border }}
-                activeOpacity={0.7}
-              >
-                <Text style={{ fontSize: 15 }}>☀️</Text>
-                <Text style={{ color: morningDone ? '#3EB87A' : c.textSecondary, fontSize: 13, fontWeight: '500', flex: 1 }}>Morning</Text>
-                {morningDone && <Ionicons name="checkmark-circle" size={16} color="#3EB87A" />}
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={toggleEvening}
-                style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10, backgroundColor: eveningDone ? '#5B8FD418' : c.surfaceAlt, borderWidth: 1.5, borderColor: eveningDone ? '#5B8FD4' : c.border }}
-                activeOpacity={0.7}
-              >
-                <Text style={{ fontSize: 15 }}>🌙</Text>
-                <Text style={{ color: eveningDone ? '#5B8FD4' : c.textSecondary, fontSize: 13, fontWeight: '500', flex: 1 }}>Evening</Text>
-                {eveningDone && <Ionicons name="checkmark-circle" size={16} color="#5B8FD4" />}
-              </TouchableOpacity>
-            </View>
-          </View>
+          </TouchableOpacity>
 
           {/* Blocks */}
           <View style={{ paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: c.border + '88' }}>

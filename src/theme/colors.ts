@@ -16,8 +16,9 @@ export function getCategoryColor(
   customCategories: { id: string; name: string; color: string }[],
   c: ThemeColors
 ): string {
-  if (category in c.categories) return c.categories[category];
-  const custom = customCategories.find((x) => x.name === category);
+  const key = category.toLowerCase();
+  if (key in c.categories) return c.categories[key];
+  const custom = customCategories.find((x) => x.name.toLowerCase() === key);
   return custom?.color ?? c.primary;
 }
 
@@ -26,8 +27,9 @@ export function getCategoryBg(
   customCategories: { id: string; name: string; bg: string }[],
   c: ThemeColors
 ): string {
-  if (category in c.categoryBg) return c.categoryBg[category];
-  const custom = customCategories.find((x) => x.name === category);
+  const key = category.toLowerCase();
+  if (key in c.categoryBg) return c.categoryBg[key];
+  const custom = customCategories.find((x) => x.name.toLowerCase() === key);
   return custom?.bg ?? c.primaryFaint;
 }
 
