@@ -12,6 +12,8 @@ export interface CustomCategory {
 
 export type WeekStartDay = 'sunday' | 'monday';
 
+export type WeeklyAverageMode = 'rolling' | 'calendar';
+
 interface SettingsState {
   userName: string;
   apiKey: string;
@@ -22,6 +24,9 @@ interface SettingsState {
   theme: ThemeKey;
   weekStartDay: WeekStartDay;
   customCategories: CustomCategory[];
+  stepGoal: number;
+  sleepTarget: number;
+  weeklyAverageMode: WeeklyAverageMode;
   loaded: boolean;
 }
 
@@ -35,6 +40,9 @@ interface SettingsStore extends SettingsState {
   setProvider: (p: AIProvider) => void;
   setTheme: (theme: ThemeKey) => void;
   setWeekStartDay: (d: WeekStartDay) => void;
+  setStepGoal: (goal: number) => void;
+  setSleepTarget: (hrs: number) => void;
+  setWeeklyAverageMode: (mode: WeeklyAverageMode) => void;
   addCustomCategory: (cat: Omit<CustomCategory, 'id'>) => void;
   updateCustomCategory: (id: string, updates: Partial<Omit<CustomCategory, 'id'>>) => void;
   deleteCustomCategory: (id: string) => void;
@@ -55,6 +63,9 @@ function persistState(state: SettingsState) {
       theme: state.theme,
       weekStartDay: state.weekStartDay,
       customCategories: state.customCategories,
+      stepGoal: state.stepGoal,
+      sleepTarget: state.sleepTarget,
+      weeklyAverageMode: state.weeklyAverageMode,
     })
   );
 }
@@ -69,6 +80,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   theme: 'dusk',
   weekStartDay: 'monday',
   customCategories: [],
+  stepGoal: 10000,
+  sleepTarget: 8,
+  weeklyAverageMode: 'rolling',
   loaded: false,
 
   load: async () => {
@@ -76,7 +90,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved = JSON.parse(raw);
-        set({ ...saved, provider: saved.provider ?? 'groq', loaded: true });
+        set({
+          ...saved,
+          provider: saved.provider ?? 'groq',
+          stepGoal: saved.stepGoal ?? 10000,
+          sleepTarget: saved.sleepTarget ?? 8,
+          weeklyAverageMode: saved.weeklyAverageMode ?? 'rolling',
+          loaded: true,
+        });
       } else {
         const oldKey = await AsyncStorage.getItem('@meridian:anthropic_key');
         set({ apiKey: oldKey ?? '', provider: oldKey ? 'anthropic' : 'groq', loaded: true });
@@ -86,6 +107,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
+  setStepGoal: (stepGoal) => { set({ stepGoal }); persistState(get()); },
+  setSleepTarget: (sleepTarget) => { set({ sleepTarget }); persistState(get()); },
+  setWeeklyAverageMode: (weeklyAverageMode) => { set({ weeklyAverageMode }); persistState(get()); },
   setUserName: (userName) => { set({ userName }); persistState(get()); },
   setApiKey: (apiKey) => { set({ apiKey }); persistState(get()); },
   setGroqApiKey: (groqApiKey) => { set({ groqApiKey }); persistState(get()); },

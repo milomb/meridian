@@ -2,8 +2,8 @@
   "expo": {
     "name": "Meridian",
     "slug": "meridian",
-    "version": "1.0.0",
-    "orientation": "portrait",
+    "version": "0.0.2",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
@@ -18,7 +18,9 @@
       "infoPlist": {
         "NSCalendarsUsageDescription": "Meridian needs access to your calendar to sync schedule blocks.",
         "NSMicrophoneUsageDescription": "Meridian needs microphone access for voice input in AI Chat.",
-        "NSCalendarsFullAccessUsageDescription": "Meridian needs full calendar access to create and manage schedule blocks."
+        "NSCalendarsFullAccessUsageDescription": "Meridian needs full calendar access to create and manage schedule blocks.",
+        "NSHealthShareUsageDescription": "Meridian reads your step count and sleep data to populate the Performance tab.",
+        "NSHealthUpdateUsageDescription": "Meridian does not write health data."
       }
     },
     "android": {

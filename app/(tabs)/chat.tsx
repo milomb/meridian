@@ -17,14 +17,12 @@ import * as Speech from 'expo-speech';
 import { Audio } from 'expo-av';
 import { useColors } from '../../src/theme/colors';
 import { useSettingsStore } from '../../src/store/settingsStore';
-import { sendAIMessage, AIMessage } from '../../src/utils/ai';
-import { parseAIResponse, executeAction, buildSystemPrompt, getActionLabel, AIAction } from '../../src/utils/aiActions';
+import { sendMessageWithTools, ChatMessage, ProviderConfig } from '../../src/ai/client';
 
 interface Message {
   id: string;
   role: 'user' | 'assistant';
-  content: string;     // shown to user
-  rawContent?: string; // full raw AI response — sent back in history so AI keeps context
+  content: string;
   timestamp: Date;
   actionResult?: string;
 }
@@ -104,25 +102,22 @@ function MessageBubble({ message, c }: { message: Message; c: any }) {
 
 export default function ChatScreen() {
   const c = useColors();
-  const { apiKey, groqApiKey, ollamaUrl, ollamaModel, provider, userName } = useSettingsStore();
+  const { groqApiKey, userName } = useSettingsStore();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [pendingAction, setPendingAction] = useState<AIAction | null>(null);
   const scrollRef = useRef<ScrollView>(null);
 
-  const activeKey = provider === 'groq' ? groqApiKey : provider === 'ollama' ? ollamaUrl : apiKey;
-  const providerLabel = provider === 'groq' ? 'Groq · Llama 3.3' : provider === 'ollama' ? 'Ollama' : 'Claude';
-  const actionLabel = getActionLabel(pendingAction ?? undefined);
+  const isConfigured = !!groqApiKey;
 
   // Prefetch voice on mount
   useEffect(() => { getBestVoice(); }, []);
 
   const sendMessage = async (text: string) => {
     if (!text.trim() || loading) return;
-    if (!activeKey) {
-      Alert.alert('No AI configured', 'Add a key or Ollama URL in Browse → Settings.', [
+    if (!isConfigured) {
+      Alert.alert('Groq API key required', 'Add a free Groq key in Browse → Settings to use AI.', [
         { text: 'Settings', onPress: () => router.push('/(tabs)/settings' as any) },
         { text: 'Cancel', style: 'cancel' },
       ]);
@@ -142,37 +137,16 @@ export default function ChatScreen() {
     setLoading(true);
 
     try {
-      // Use rawContent for AI history so it keeps full action context across turns
-      const history: AIMessage[] = [...messages, userMsg].map((m) => ({
-        role: m.role,
-        content: m.rawContent ?? m.content,
-      }));
-
-      const system = buildSystemPrompt(userName);
-      const raw = await sendAIMessage(history, system, provider, apiKey, groqApiKey, 800, ollamaUrl, ollamaModel);
-      const parsed = parseAIResponse(raw);
-
-      // Execute if ready, else track pending
-      let actionResult: string | undefined;
-      if (parsed.action && parsed.action.type !== 'NONE') {
-        const result = executeAction(parsed.action);
-        if (result) {
-          actionResult = result;
-          setPendingAction(null);
-        } else {
-          setPendingAction(parsed.action);
-        }
-      } else {
-        setPendingAction(null);
-      }
+      const history: ChatMessage[] = [...messages, userMsg].map((m) => ({ role: m.role, content: m.content }));
+      const config: ProviderConfig = { provider: 'groq', apiKey: groqApiKey };
+      const result = await sendMessageWithTools(history, userName, config);
 
       const assistantMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: parsed.message,
-        rawContent: raw, // ← full JSON kept for AI history
+        content: result.text,
         timestamp: new Date(),
-        actionResult,
+        actionResult: result.actionResult,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err: any) {
@@ -195,7 +169,6 @@ export default function ChatScreen() {
 
   const clearChat = () => {
     setMessages([]);
-    setPendingAction(null);
   };
 
   return (
@@ -207,8 +180,8 @@ export default function ChatScreen() {
       }}>
         <View>
           <Text style={{ color: c.text, fontSize: 22, fontWeight: '600' }}>AI Chat</Text>
-          <Text style={{ color: activeKey ? c.textMuted : c.error, fontSize: 11, marginTop: 1, fontWeight: '400' }}>
-            {providerLabel}{activeKey ? '' : ' · no key set'}
+          <Text style={{ color: isConfigured ? c.textMuted : c.error, fontSize: 11, marginTop: 1, fontWeight: '400' }}>
+            {'Groq · Llama 3.3'}{isConfigured ? '' : ' · no key set'}
           </Text>
         </View>
         <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
@@ -230,18 +203,6 @@ export default function ChatScreen() {
         </View>
       </View>
 
-      {/* Status banner — shows while building an action */}
-      {actionLabel && (
-        <View style={{
-          flexDirection: 'row', alignItems: 'center', gap: 8,
-          backgroundColor: c.primaryFaint, borderBottomWidth: 1, borderBottomColor: c.border,
-          paddingHorizontal: 20, paddingVertical: 8,
-        }}>
-          <ActivityIndicator size="small" color={c.primary} />
-          <Text style={{ color: c.primary, fontSize: 13, fontWeight: '500' }}>{actionLabel}</Text>
-        </View>
-      )}
-
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView
           ref={scrollRef}
@@ -258,7 +219,7 @@ export default function ChatScreen() {
               <Text style={{ color: c.textSecondary, fontSize: 14, textAlign: 'center', lineHeight: 21, fontWeight: '400' }}>
                 {"Ask me anything — 'what's today look like?', 'create a workout block', or just chat."}
               </Text>
-              {!activeKey && (
+              {!isConfigured && (
                 <TouchableOpacity
                   onPress={() => router.push('/(tabs)/settings' as any)}
                   style={{
@@ -301,7 +262,7 @@ export default function ChatScreen() {
             }}
             value={input}
             onChangeText={setInput}
-            placeholder={pendingAction ? 'Reply to continue…' : "Message Meridian…"}
+            placeholder="Message Meridian…"
             placeholderTextColor={c.textMuted}
             multiline
             maxLength={2000}

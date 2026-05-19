@@ -13,74 +13,39 @@ export interface TimeBlock {
   daysOfWeek: DayOfWeek[];
   isFixed: boolean;
   reminder: boolean;
+  weight: number; // 1–3, default 2; higher = more score contribution
 }
 
 const DEFAULT_BLOCKS: TimeBlock[] = [
   {
-    id: '1',
-    title: 'Morning Training',
-    description: '',
-    startTime: '06:00',
-    endTime: '07:30',
-    category: 'training',
-    daysOfWeek: [1, 2, 3, 4, 5],
-    isFixed: true,
-    reminder: true,
+    id: '1', title: 'Morning Training', description: '',
+    startTime: '06:00', endTime: '07:30', category: 'training',
+    daysOfWeek: [1, 2, 3, 4, 5], isFixed: true, reminder: true, weight: 3,
   },
   {
-    id: '2',
-    title: 'Deep Work',
-    description: '',
-    startTime: '09:00',
-    endTime: '12:00',
-    category: 'work',
-    daysOfWeek: [1, 2, 3, 4, 5],
-    isFixed: true,
-    reminder: true,
+    id: '2', title: 'Deep Work', description: '',
+    startTime: '09:00', endTime: '12:00', category: 'work',
+    daysOfWeek: [1, 2, 3, 4, 5], isFixed: true, reminder: true, weight: 3,
   },
   {
-    id: '3',
-    title: 'Lunch & Nutrition',
-    description: '',
-    startTime: '12:00',
-    endTime: '13:00',
-    category: 'nutrition',
-    daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
-    isFixed: false,
-    reminder: false,
+    id: '3', title: 'Lunch & Nutrition', description: '',
+    startTime: '12:00', endTime: '13:00', category: 'nutrition',
+    daysOfWeek: [0, 1, 2, 3, 4, 5, 6], isFixed: false, reminder: false, weight: 2,
   },
   {
-    id: '4',
-    title: 'Learning Block',
-    description: '',
-    startTime: '14:00',
-    endTime: '15:30',
-    category: 'learning',
-    daysOfWeek: [1, 2, 3, 4, 5],
-    isFixed: false,
-    reminder: true,
+    id: '4', title: 'Learning Block', description: '',
+    startTime: '14:00', endTime: '15:30', category: 'learning',
+    daysOfWeek: [1, 2, 3, 4, 5], isFixed: false, reminder: true, weight: 2,
   },
   {
-    id: '5',
-    title: 'Personal Time',
-    description: '',
-    startTime: '18:00',
-    endTime: '20:00',
-    category: 'personal',
-    daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
-    isFixed: false,
-    reminder: false,
+    id: '5', title: 'Personal Time', description: '',
+    startTime: '18:00', endTime: '20:00', category: 'personal',
+    daysOfWeek: [0, 1, 2, 3, 4, 5, 6], isFixed: false, reminder: false, weight: 1,
   },
   {
-    id: '6',
-    title: 'Wind Down',
-    description: '',
-    startTime: '21:30',
-    endTime: '22:30',
-    category: 'rest',
-    daysOfWeek: [0, 1, 2, 3, 4, 5, 6],
-    isFixed: false,
-    reminder: true,
+    id: '6', title: 'Wind Down', description: '',
+    startTime: '21:30', endTime: '22:30', category: 'rest',
+    daysOfWeek: [0, 1, 2, 3, 4, 5, 6], isFixed: false, reminder: true, weight: 2,
   },
 ];
 
@@ -103,11 +68,14 @@ export const useScheduleStore = create<ScheduleStore>((set, get) => ({
     try {
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
       const blocks = raw ? JSON.parse(raw) : DEFAULT_BLOCKS;
-      // Backfill description for blocks loaded before it was added
-      const migrated = blocks.map((b: TimeBlock) => ({
-        ...b,
-        description: b.description ?? '',
-      }));
+      const migrated = blocks
+        .filter((b: TimeBlock) => b.startTime && b.endTime && b.title)
+        .map((b: TimeBlock) => ({
+          ...b,
+          description: b.description ?? '',
+          weight: b.weight ?? 2,
+          isFixed: b.isFixed ?? false,
+        }));
       set({ blocks: migrated, loaded: true });
     } catch {
       set({ blocks: DEFAULT_BLOCKS, loaded: true });
